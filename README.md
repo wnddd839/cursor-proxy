@@ -147,6 +147,8 @@ opencode run "your prompt" --model cursor-acp/sonnet-4.5
 
 Any MCP servers already configured in your `opencode.json` work automatically with cursor-acp models — no extra setup needed. The plugin discovers them at startup and injects usage instructions into the system prompt so the model calls them via cursor-agent's Shell tool.
 
+`mcptool` is a shell CLI, so opencode applies your `bash` permission rules to `mcptool call ...`. If you rely on MCP tools asking for confirmation, keep `bash` as `ask` or add explicit `ask`/`deny` rules for `mcptool call *`.
+
 ```bash
 mcptool servers                                    # list discovered servers
 mcptool tools [server]                             # list available tools
