@@ -136,6 +136,57 @@ opencode auth login   # provider id: cursor-acp
 cursor-agent login    # direct
 ```
 
+## Standalone NewAPI Gateway
+
+This fork also includes a standalone OpenAI-compatible gateway that does not
+require OpenCode. It still uses `cursor-agent` underneath, but exposes a normal
+HTTP API that NewAPI can add as an OpenAI-compatible channel.
+
+```bash
+cursor-agent login
+
+# Optional but recommended before exposing it publicly:
+export CURSOR_GATEWAY_API_KEY="replace-with-a-long-secret"
+
+npm run gateway
+```
+
+Default endpoints:
+
+```text
+GET  http://127.0.0.1:32124/health
+GET  http://127.0.0.1:32124/v1/models
+POST http://127.0.0.1:32124/v1/chat/completions
+```
+
+NewAPI channel settings:
+
+```text
+Type: OpenAI-compatible
+Base URL: http://127.0.0.1:32124/v1
+API Key: CURSOR_GATEWAY_API_KEY
+Model: auto
+```
+
+Admin page:
+
+```text
+http://127.0.0.1:32124/admin
+```
+
+Useful environment variables:
+
+```text
+CURSOR_GATEWAY_HOST=127.0.0.1
+CURSOR_GATEWAY_PORT=32124
+CURSOR_GATEWAY_API_KEY=replace-with-a-long-secret
+CURSOR_GATEWAY_ADMIN_PASSWORD=replace-with-a-long-admin-password
+CURSOR_GATEWAY_WORKSPACE=/tmp/cursor-gateway-workspace
+CURSOR_GATEWAY_MODE=default
+CURSOR_GATEWAY_MAX_SYSTEM_CHARS=6000
+CURSOR_AGENT_PATH=/path/to/cursor-agent
+```
+
 ## Usage
 
 ```bash

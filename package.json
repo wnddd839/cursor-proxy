@@ -8,6 +8,7 @@
   "scripts": {
     "build": "bun build ./src/index.ts ./src/plugin-entry.ts ./src/cli/discover.ts ./src/cli/opencode-cursor.ts ./src/cli/mcptool.ts --outdir ./dist --target node --external @opencode-ai/plugin --external zod",
     "dev": "bun build ./src/index.ts ./src/plugin-entry.ts ./src/cli/discover.ts ./src/cli/opencode-cursor.ts ./src/cli/mcptool.ts --outdir ./dist --target node --watch --external @opencode-ai/plugin --external zod",
+    "gateway": "node ./cursor-gateway.mjs",
     "test": "bun test",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",

@@ -1,0 +1,18 @@
+[Unit]
+Description=Cursor Direct Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/cursor-direct-gateway
+EnvironmentFile=/opt/cursor-direct-gateway/cursor-direct-gateway.env
+ExecStart=/usr/local/bin/node /opt/cursor-direct-gateway/cursor-direct-gateway.mjs
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
