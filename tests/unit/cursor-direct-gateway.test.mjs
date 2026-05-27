@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  applyDirectCompletionEvents,
   buildDirectAdminHtml,
   buildDirectAdminStatusPayload,
+  createAssistantTextAccumulator,
   createConnectFrameParser,
   createDirectMetadataCaches,
   createLegacyDirectAccount,
@@ -61,6 +63,10 @@ function cursorThinkingDelta(text) {
 
 function cursorCheckpoint(text) {
   return fieldMessage(3, fieldString(1, text));
+}
+
+function cursorTurnEnded() {
+  return fieldMessage(1, fieldMessage(14, Buffer.alloc(0)));
 }
 
 test("normalizeDirectModel maps public auto alias to Cursor default model id", () => {
@@ -215,6 +221,58 @@ test("createConnectFrameParser raises Connect trailer errors instead of treating
   );
 });
 
+test("createConnectFrameParser emits Connect end-stream control events", () => {
+  const parser = createConnectFrameParser();
+  const events = parser.push(connectFrame(Buffer.from("{}"), 0x02));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "connect_end");
+});
+
+test("createConnectFrameParser emits Cursor turn-ended control events by default", () => {
+  const parser = createConnectFrameParser();
+  const events = parser.push(connectFrame(cursorTurnEnded()));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "turn_ended");
+});
+
+test("applyDirectCompletionEvents emits text deltas and reports turn-ended", () => {
+  const accumulator = createAssistantTextAccumulator();
+  const emitted = [];
+
+  const result = applyDirectCompletionEvents([
+    { type: "text_delta", text: "OK", frameIndex: 1, eventIndex: 0 },
+    { type: "turn_ended", frameIndex: 1, eventIndex: 1 },
+  ], {
+    accumulator,
+    onDelta: (delta) => emitted.push(delta),
+  });
+
+  assert.deepEqual(emitted, ["OK"]);
+  assert.equal(accumulator.text, "OK");
+  assert.equal(result.textEventCount, 1);
+  assert.equal(result.deltaCount, 1);
+  assert.equal(result.turnEnded, true);
+});
+
+test("applyDirectCompletionEvents appends Cursor text deltas without inserted spaces", () => {
+  const accumulator = createAssistantTextAccumulator();
+  const result = applyDirectCompletionEvents([
+    { type: "text_delta", text: "D", frameIndex: 1, eventIndex: 0 },
+    { type: "text_delta", text: "IRECT", frameIndex: 2, eventIndex: 0 },
+    { type: "text_delta", text: "_ADMIN", frameIndex: 3, eventIndex: 0 },
+    { type: "text_delta", text: "_OK", frameIndex: 4, eventIndex: 0 },
+    { type: "connect_end", frameIndex: 5, eventIndex: 0 },
+  ], {
+    accumulator,
+  });
+
+  assert.equal(accumulator.text, "DIRECT_ADMIN_OK");
+  assert.equal(result.textEventCount, 4);
+  assert.equal(result.connectEnded, true);
+});
+
 test("metadata caches clone values and invalidate together", () => {
   const caches = createDirectMetadataCaches();
   const value = setMetadataCache(caches.models, [{ id: "auto" }], { now: 1000, ttlMs: 5000 });
@@ -235,12 +293,14 @@ test("runDirectCompletionWithRetry retries another account before first payload"
   ];
   const result = await runDirectCompletionWithRetry("hello", "default", {
     maxAttempts: 2,
+    idleMs: 1234,
     selectAccount: async () => {
       const account = accounts[selected.length];
       selected.push(account.id);
       return { source: "pool", account, store: { accounts }, index: selected.length - 1 };
     },
     runAttempt: async (_prompt, _model, options) => {
+      assert.equal(options.idleMs, 1234);
       if (options.account.id === "first") {
         const error = new Error("socket hang up");
         error.beforeFirstPayload = true;

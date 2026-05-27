@@ -1416,6 +1416,7 @@ function createConnectFrameParser(options = {}) {
             pending = Buffer.alloc(0);
             throw trailerError;
           }
+          events.push({ type: "connect_end", frameIndex, eventIndex: 0 });
           offset += 5 + length;
           frameIndex += 1;
           continue;
@@ -1432,6 +1433,8 @@ function createConnectFrameParser(options = {}) {
               eventIndex,
             });
             state.strings += 1;
+          } else if (event.type === "turn_ended") {
+            events.push({ ...event, frameIndex, eventIndex });
           } else if (options.includeNonTextEvents) {
             events.push({ ...event, frameIndex, eventIndex });
           }
@@ -1633,10 +1636,9 @@ function createAssistantTextAccumulator(options = {}) {
         const deltas = [];
         for (const item of textDeltas) {
           if (item.frameIndex < state.lastFrameIndex) continue;
-          const next = appendAssistantFragmentWithDelta(state.text, item.text);
-          state.text = next.text;
+          state.text += item.text;
           state.lastFrameIndex = Math.max(state.lastFrameIndex, item.frameIndex);
-          if (next.delta) deltas.push(next.delta);
+          if (item.text) deltas.push(item.text);
         }
         return deltas;
       }
@@ -1662,6 +1664,32 @@ function createAssistantTextAccumulator(options = {}) {
       }
       return deltas;
     },
+  };
+}
+
+function applyDirectCompletionEvents(events = [], options = {}) {
+  const accumulator = options.accumulator || createAssistantTextAccumulator(options);
+  const eventList = Array.isArray(events) ? events : [];
+  const textEvents = eventList.filter((event) => (
+    event?.type === "text_delta" ||
+    (!event?.type && typeof event?.text === "string")
+  ));
+  const deltas = accumulator.pushStrings(textEvents);
+
+  for (const delta of deltas) {
+    if (!delta) continue;
+    options.onDelta?.(delta, {
+      text: accumulator.text,
+      ...(options.meta || {}),
+    });
+  }
+
+  return {
+    eventCount: eventList.length,
+    textEventCount: textEvents.length,
+    deltaCount: deltas.filter(Boolean).length,
+    turnEnded: eventList.some((event) => event?.type === "turn_ended"),
+    connectEnded: eventList.some((event) => event?.type === "connect_end"),
   };
 }
 
@@ -1753,16 +1781,21 @@ function runDirectCompletion(prompt, model, options = {}) {
       fn(value);
     };
 
-    const emitDeltas = (strings) => {
-      stringCount += strings.length;
-      const deltas = accumulator.pushStrings(strings);
-      for (const delta of deltas) {
-        if (!delta) continue;
-        emittedContent = true;
-        deltaCount += 1;
-        if (typeof options.onDelta === "function") {
-          options.onDelta(delta, { text: accumulator.text, status, bytes: responseBytes });
-        }
+    const handleCompletionEvents = (events) => {
+      const result = applyDirectCompletionEvents(events, {
+        accumulator,
+        meta: { status, bytes: responseBytes },
+        onDelta: (delta, meta) => {
+          emittedContent = true;
+          if (typeof options.onDelta === "function") {
+            options.onDelta(delta, meta);
+          }
+        },
+      });
+      stringCount += result.textEventCount;
+      deltaCount += result.deltaCount;
+      if (result.turnEnded || result.connectEnded) {
+        finishWithCurrentData(result.turnEnded ? "turn-ended" : "connect-end");
       }
     };
 
@@ -1822,15 +1855,16 @@ function runDirectCompletion(prompt, model, options = {}) {
     request.on("data", (chunk) => {
       responseBytes += chunk.length;
       try {
-        emitDeltas(parser.push(chunk));
+        handleCompletionEvents(parser.push(chunk));
       } catch (error) {
         settle(reject, makeError(error instanceof Error ? error.message : String(error)));
         return;
       }
+      if (settled) return;
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         finishWithCurrentData();
-      }, Math.max(250, config.idleMs));
+      }, Math.max(250, Number(options.idleMs || config.idleMs)));
     });
     request.on("end", () => {
       finishWithCurrentData();
@@ -1862,6 +1896,7 @@ async function runDirectCompletionWithRetry(prompt, model, options = {}) {
       const result = await runAttempt(prompt, model, {
         accessToken: selection.account.accessToken,
         account: selection.account,
+        idleMs: options.idleMs,
         signal: options.signal,
         onDelta: (delta, meta) => {
           emittedOnAttempt = emittedOnAttempt || Boolean(delta);
@@ -2379,7 +2414,10 @@ async function handle(req, res) {
       const started = Date.now();
       const finishRequest = beginTrackedRequest(model, prompt.length);
       try {
-        const result = await runDirectCompletionFromPool(prompt, model, { accountId: body?.accountId || "" });
+        const result = await runDirectCompletionFromPool(prompt, model, {
+          accountId: body?.accountId || "",
+          idleMs: Number(process.env.CURSOR_DIRECT_PROBE_IDLE_MS || "1200"),
+        });
         const durationMs = Date.now() - started;
         finishRequest(true, { outputChars: result.text.length });
         const response = json(200, {
@@ -2607,6 +2645,7 @@ async function handle(req, res) {
 }
 
 export {
+  applyDirectCompletionEvents,
   buildDirectAdminHtml,
   buildDirectAdminStatusPayload,
   buildPromptFromMessages,
