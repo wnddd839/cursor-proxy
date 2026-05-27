@@ -7,11 +7,15 @@ import {
   buildDirectAdminHtml,
   buildDirectAdminClientConfig,
   buildDirectAdminStatusPayload,
+  buildClaudeToolsPrompt,
   buildPromptFromClaudeMessages,
   createAssistantTextAccumulator,
+  createClaudeMessageStartPayload,
+  createClaudeMessagesResponse,
   createClaudeMessage,
   createClaudeStreamEvent,
   createClaudeTokenCount,
+  createClaudeToolUseMessage,
   createConnectFrameParser,
   createCursorClientResponsesForEvents,
   createDirectMetadataCaches,
@@ -25,6 +29,7 @@ import {
   normalizeDirectModel,
   normalizeApiPath,
   normalizePublicModelName,
+  parseClaudeToolUse,
   pickAssistantCandidate,
   pickAssistantText,
   runDirectCompletionWithRetry,
@@ -148,9 +153,96 @@ test("buildPromptFromClaudeMessages converts Claude system and text blocks", () 
       "SYSTEM: Be concise.",
       "USER: Hello",
       "ASSISTANT: Hi there.",
-      "USER: Tool says yes",
+      "USER_TOOL_RESULT (unknown): Tool says yes",
     ].join("\n\n"),
   );
+});
+
+test("buildPromptFromClaudeMessages includes Claude tool schemas and prior tool uses", () => {
+  const tools = [{
+    name: "Read",
+    description: "Read a file",
+    input_schema: { type: "object", properties: { file_path: { type: "string" } }, required: ["file_path"] },
+  }];
+  const prompt = buildPromptFromClaudeMessages([
+    { role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "README.md" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "hello" }] },
+    { role: "user", content: "Read README.md" },
+  ], "Use tools when needed.", { tools, toolChoice: { type: "tool", name: "Read" } });
+
+  assert.match(prompt, /CLAUDE_TOOL_USE_CONTRACT/);
+  assert.match(prompt, /"name":"Read"/);
+  assert.match(prompt, /gateway executes the listed tool/);
+  assert.match(prompt, /Never say a listed tool is unavailable/);
+  assert.match(prompt, /You must call tool "Read"/);
+  assert.match(prompt, /ASSISTANT_TOOL_USE \(toolu_1\): Read/);
+  assert.match(prompt, /USER_TOOL_RESULT \(toolu_1\): hello/);
+});
+
+test("parseClaudeToolUse extracts strict JSON tool call text", () => {
+  const toolUse = parseClaudeToolUse('{"type":"tool_use","name":"Read","input":{"file_path":"README.md"}}', {
+    tools: [{ name: "Read" }],
+  });
+
+  assert.deepEqual(toolUse, {
+    id: toolUse.id,
+    name: "Read",
+    input: { file_path: "README.md" },
+  });
+  assert.match(toolUse.id, /^toolu_/);
+});
+
+test("parseClaudeToolUse restores tool calls wrapped in code fences", () => {
+  const toolUse = parseClaudeToolUse('```json\n{"tool":"Bash","arguments":{"command":"pwd"}}\n```', {
+    tools: [{ name: "Bash" }],
+  });
+
+  assert.equal(toolUse.name, "Bash");
+  assert.deepEqual(toolUse.input, { command: "pwd" });
+});
+
+test("createClaudeToolUseMessage returns Anthropic tool_use response shape", () => {
+  const response = createClaudeToolUseMessage("composer-2.5-fast", {
+    id: "toolu_test",
+    name: "Read",
+    input: { file_path: "README.md" },
+  }, "USER: Read README.md", { publicModel: "composer-2.5-fast" });
+
+  assert.equal(response.stop_reason, "tool_use");
+  assert.deepEqual(response.content, [{
+    type: "tool_use",
+    id: "toolu_test",
+    name: "Read",
+    input: { file_path: "README.md" },
+  }]);
+});
+
+test("createClaudeMessagesResponse turns strict tool JSON into a Claude tool_use response", () => {
+  const response = createClaudeMessagesResponse(
+    "composer-2.5-fast",
+    '{"type":"tool_use","name":"Read","input":{"file_path":"README.md"}}',
+    "USER: Read README.md",
+    {
+      publicModel: "claude-sonnet-4-5",
+      tools: [{ name: "Read" }],
+      toolChoice: { type: "tool", name: "Read" },
+    },
+  );
+
+  assert.equal(response.model, "claude-sonnet-4-5");
+  assert.equal(response.stop_reason, "tool_use");
+  assert.equal(response.content[0].type, "tool_use");
+  assert.equal(response.content[0].name, "Read");
+  assert.deepEqual(response.content[0].input, { file_path: "README.md" });
+});
+
+test("createClaudeMessageStartPayload starts only the message envelope", () => {
+  const payload = createClaudeMessageStartPayload("msg_test", "claude-sonnet-4-5", "USER: Hello");
+
+  assert.equal(payload.type, "message_start");
+  assert.equal(payload.message.id, "msg_test");
+  assert.deepEqual(payload.message.content, []);
+  assert.equal(payload.message.stop_reason, null);
 });
 
 test("createClaudeMessage returns Anthropic message response shape", () => {

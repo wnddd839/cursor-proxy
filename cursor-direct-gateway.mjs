@@ -2156,19 +2156,185 @@ function extractClaudeTextContent(content) {
   return String(content);
 }
 
-function buildPromptFromClaudeMessages(messages, system = undefined) {
+function normalizeClaudeTools(tools) {
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .filter((tool) => tool && typeof tool.name === "string" && tool.name.trim())
+    .map((tool) => ({
+      name: tool.name.trim(),
+      description: typeof tool.description === "string" ? tool.description : "",
+      input_schema: tool.input_schema && typeof tool.input_schema === "object"
+        ? tool.input_schema
+        : { type: "object", properties: {} },
+    }));
+}
+
+function normalizeClaudeToolChoice(toolChoice) {
+  if (!toolChoice || typeof toolChoice !== "object") return null;
+  const type = typeof toolChoice.type === "string" ? toolChoice.type : "";
+  if (type === "auto" || !type) return { type: "auto" };
+  if (type === "none") return { type: "none" };
+  if (type === "any") return { type: "any" };
+  if (type === "tool" && typeof toolChoice.name === "string" && toolChoice.name.trim()) {
+    return { type: "tool", name: toolChoice.name.trim() };
+  }
+  return null;
+}
+
+function buildClaudeToolsPrompt(tools = [], toolChoice = null) {
+  const normalizedTools = normalizeClaudeTools(tools);
+  const normalizedChoice = normalizeClaudeToolChoice(toolChoice);
+  if (normalizedTools.length === 0 || normalizedChoice?.type === "none") return "";
+  const choiceLine = normalizedChoice?.type === "tool"
+    ? `You must call tool "${normalizedChoice.name}".`
+    : normalizedChoice?.type === "any"
+      ? "You must call one available tool."
+      : "Call a tool when it is needed to answer or perform the user's request.";
+  return [
+    "CLAUDE_TOOL_USE_CONTRACT:",
+    "You are behind a gateway that converts strict JSON into Anthropic tool_use blocks.",
+    "You do not execute tools yourself; the gateway executes the listed tool after you emit the JSON call.",
+    "Listed tools are available through the gateway even if the upstream model runtime has no native tool API.",
+    "Never say a listed tool is unavailable. If a listed tool should be used, emit the JSON call instead.",
+    "When calling a tool, reply with only one JSON object and no prose, markdown, or code fences.",
+    'The JSON shape is: {"type":"tool_use","name":"<tool name>","input":{...}}',
+    "Infer the input object from the conversation and the tool input_schema; use {} only when no arguments can be inferred.",
+    choiceLine,
+    "Available tools JSON:",
+    JSON.stringify(normalizedTools),
+  ].join("\n");
+}
+
+function formatClaudeMessageForPrompt(message) {
+  const role = typeof message?.role === "string" ? message.role : "user";
+  const content = message?.content;
+  if (Array.isArray(content)) {
+    const lines = [];
+    for (const part of content) {
+      if (!part || typeof part !== "object") {
+        const text = extractClaudeTextContent(part).trim();
+        if (text) lines.push(`${role.toUpperCase()}: ${text}`);
+        continue;
+      }
+      if (part.type === "tool_use") {
+        const input = part.input && typeof part.input === "object" ? part.input : {};
+        lines.push(`ASSISTANT_TOOL_USE (${part.id || "unknown"}): ${part.name || "unknown"} ${JSON.stringify(input)}`);
+        continue;
+      }
+      if (part.type === "tool_result") {
+        const text = extractClaudeTextContent(part.content).trim();
+        lines.push(`USER_TOOL_RESULT (${part.tool_use_id || "unknown"}): ${text || ""}`);
+        continue;
+      }
+      const text = extractClaudeTextContent(part).trim();
+      if (text) lines.push(`${role.toUpperCase()}: ${text}`);
+    }
+    return lines;
+  }
+  const text = extractClaudeTextContent(content).trim();
+  return text ? [`${role.toUpperCase()}: ${text}`] : [];
+}
+
+function buildPromptFromClaudeMessages(messages, system = undefined, options = {}) {
   const lines = [];
   const systemText = extractClaudeTextContent(system).trim();
   if (systemText) lines.push(`SYSTEM: ${systemText}`);
 
+  const toolsPrompt = buildClaudeToolsPrompt(options.tools, options.toolChoice);
+  if (toolsPrompt) lines.push(toolsPrompt);
+
   for (const message of Array.isArray(messages) ? messages : []) {
-    const role = typeof message?.role === "string" ? message.role : "user";
-    const content = extractClaudeTextContent(message?.content).trim();
-    if (!content) continue;
-    lines.push(`${role.toUpperCase()}: ${content}`);
+    lines.push(...formatClaudeMessageForPrompt(message));
   }
 
   return lines.join("\n\n").trim() || "Hello";
+}
+
+function stripJsonCodeFence(text) {
+  const value = String(text || "").trim();
+  const fence = value.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fence ? fence[1].trim() : value;
+}
+
+function extractFirstJsonObject(text) {
+  const value = stripJsonCodeFence(text);
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // fall through to balanced-object scanning
+  }
+
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = inString;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try {
+          const parsed = JSON.parse(value.slice(start, i + 1));
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+        } catch {
+          // continue scanning
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function normalizeToolUseInput(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      return { input: value };
+    }
+  }
+  return {};
+}
+
+function parseClaudeToolUse(text, options = {}) {
+  const root = extractFirstJsonObject(text);
+  if (!root) return null;
+  const candidate = Array.isArray(root.tool_calls) ? root.tool_calls[0] : (root.tool_use || root);
+  if (!candidate || typeof candidate !== "object") return null;
+  const requestedTools = normalizeClaudeTools(options.tools);
+  const toolNames = new Map(requestedTools.map((tool) => [tool.name.toLowerCase(), tool.name]));
+  const choice = normalizeClaudeToolChoice(options.toolChoice);
+  const rawName = candidate.name || candidate.tool || candidate.tool_name || candidate.function?.name;
+  if (typeof rawName !== "string" || !rawName.trim()) return null;
+  const canonicalName = toolNames.get(rawName.trim().toLowerCase()) || rawName.trim();
+  if (requestedTools.length > 0 && !toolNames.has(canonicalName.toLowerCase())) return null;
+  if (choice?.type === "tool" && canonicalName !== choice.name) return null;
+  return {
+    id: typeof candidate.id === "string" && candidate.id.trim()
+      ? candidate.id.trim()
+      : `toolu_${randomUUID().replace(/-/g, "")}`,
+    name: canonicalName,
+    input: normalizeToolUseInput(candidate.input ?? candidate.arguments ?? candidate.args ?? candidate.function?.arguments),
+  };
 }
 
 function runDirectCompletion(prompt, model, options = {}) {
@@ -2466,6 +2632,64 @@ function createClaudeMessage(model, content, prompt, options = {}) {
     stop_reason: "end_turn",
     stop_sequence: null,
     usage: estimateClaudeUsage(prompt, content),
+  };
+}
+
+function createClaudeToolUseMessage(model, toolUse, prompt, options = {}) {
+  const normalizedToolUse = {
+    type: "tool_use",
+    id: toolUse.id || `toolu_${randomUUID().replace(/-/g, "")}`,
+    name: toolUse.name,
+    input: toolUse.input && typeof toolUse.input === "object" ? toolUse.input : {},
+  };
+  return {
+    id: options.id || `msg_cursor_direct_${Date.now()}`,
+    type: "message",
+    role: "assistant",
+    model: options.publicModel || displayModelId(model),
+    content: [normalizedToolUse],
+    stop_reason: "tool_use",
+    stop_sequence: null,
+    usage: estimateClaudeUsage(prompt, JSON.stringify(normalizedToolUse.input)),
+  };
+}
+
+function shouldAttemptClaudeToolUse(options = {}) {
+  const tools = normalizeClaudeTools(options.tools);
+  const toolChoice = normalizeClaudeToolChoice(options.toolChoice);
+  return tools.length > 0 && toolChoice?.type !== "none";
+}
+
+function createClaudeMessagesResponse(model, content, prompt, options = {}) {
+  const toolUse = shouldAttemptClaudeToolUse(options) ? parseClaudeToolUse(content, options) : null;
+  if (toolUse) {
+    return createClaudeToolUseMessage(model, toolUse, prompt, {
+      id: options.id,
+      publicModel: options.publicModel,
+    });
+  }
+  return createClaudeMessage(model, content, prompt, {
+    id: options.id,
+    publicModel: options.publicModel,
+  });
+}
+
+function createClaudeMessageStartPayload(id, model, prompt) {
+  return {
+    type: "message_start",
+    message: {
+      id,
+      type: "message",
+      role: "assistant",
+      model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: estimateClaudeUsage(prompt, "").input_tokens,
+        output_tokens: 0,
+      },
+    },
   };
 }
 
@@ -3048,6 +3272,7 @@ async function handle(req, res) {
     const prompt = buildPromptFromClaudeMessages(
       Array.isArray(body?.messages) ? body.messages : [],
       body?.system,
+      { tools: body?.tools, toolChoice: body?.tool_choice },
     );
     const response = json(200, createClaudeTokenCount(prompt));
     res.writeHead(response.status, response.headers);
@@ -3081,7 +3306,9 @@ async function handle(req, res) {
     const rawRequestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "claude-sonnet-4-5";
     const requestedModel = normalizePublicModelName(rawRequestedModel);
     const model = normalizeDirectModel(requestedModel);
-    const prompt = buildPromptFromClaudeMessages(messages, body?.system);
+    const claudeToolOptions = { tools: body?.tools, toolChoice: body?.tool_choice };
+    const prompt = buildPromptFromClaudeMessages(messages, body?.system, claudeToolOptions);
+    const shouldBufferToolResponse = shouldAttemptClaudeToolUse(claudeToolOptions);
     const streamRequested = body?.stream === true;
     const finishRequest = beginTrackedRequest(model, prompt.length, { stream: streamRequested });
     log("info", "claude messages request", {
@@ -3098,6 +3325,7 @@ async function handle(req, res) {
       const controller = new AbortController();
       let responseStarted = false;
       let responseDone = false;
+      let textBlockStarted = false;
       let streamedChars = 0;
       const keepAliveMs = Math.max(0, Number(config.streamKeepAliveMs || 0));
 
@@ -3105,7 +3333,7 @@ async function handle(req, res) {
         res.write(createClaudeStreamEvent(event, payload));
       };
 
-      const startStream = () => {
+      const startMessage = () => {
         if (responseStarted || res.destroyed) return;
         responseStarted = true;
         res.writeHead(200, {
@@ -3115,22 +3343,14 @@ async function handle(req, res) {
           "x-accel-buffering": "no",
           "access-control-allow-origin": "*",
         });
-        writeClaudeEvent("message_start", {
-          type: "message_start",
-          message: {
-            id,
-            type: "message",
-            role: "assistant",
-            model: requestedModel,
-            content: [],
-            stop_reason: null,
-            stop_sequence: null,
-            usage: {
-              input_tokens: estimateClaudeUsage(prompt, "").input_tokens,
-              output_tokens: 0,
-            },
-          },
-        });
+        writeClaudeEvent("message_start", createClaudeMessageStartPayload(id, requestedModel, prompt));
+        flushResponse(res);
+      };
+
+      const startTextBlock = () => {
+        startMessage();
+        if (textBlockStarted || res.destroyed) return;
+        textBlockStarted = true;
         writeClaudeEvent("content_block_start", {
           type: "content_block_start",
           index: 0,
@@ -3139,56 +3359,8 @@ async function handle(req, res) {
         flushResponse(res);
       };
 
-      const keepAliveTimer = keepAliveMs > 0
-        ? setInterval(() => {
-          if (!responseDone && responseStarted && !res.destroyed) {
-            writeClaudeEvent("ping", { type: "ping" });
-            flushResponse(res);
-          }
-        }, keepAliveMs)
-        : null;
-
-      const cancelOnClose = () => {
-        if (!responseDone) controller.abort();
-      };
-      res.on("close", cancelOnClose);
-
-      try {
-        startStream();
-        const result = await runDirectCompletionFromPool(prompt, model, {
-          signal: controller.signal,
-          onDelta: (delta) => {
-            if (!delta || res.destroyed) return;
-            startStream();
-            streamedChars += delta.length;
-            writeClaudeEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: 0,
-              delta: { type: "text_delta", text: delta },
-            });
-            flushResponse(res);
-          },
-        });
-        if (keepAliveTimer) clearInterval(keepAliveTimer);
-        finishRequest(true, {
-          outputChars: result.text.length,
-          upstreamBytes: result.bytes,
-          stringCount: result.stringCount,
-          deltaCount: result.deltaCount,
-        });
-        log("info", "claude messages response", {
-          model: displayModelId(model),
-          requestedModel,
-          stream: true,
-          outputChars: result.text.length,
-          upstreamBytes: result.bytes,
-          stringCount: result.stringCount,
-          deltaCount: result.deltaCount,
-          durationMs: result.durationMs,
-          accountId: result.accountId || "",
-        });
-
-        startStream();
+      const finishTextResponse = (result) => {
+        startTextBlock();
         if (streamedChars === 0 && result.text) {
           streamedChars += result.text.length;
           writeClaudeEvent("content_block_delta", {
@@ -3207,6 +3379,94 @@ async function handle(req, res) {
           usage: { output_tokens: estimateClaudeUsage(prompt, result.text).output_tokens },
         });
         writeClaudeEvent("message_stop", { type: "message_stop" });
+      };
+
+      const finishToolUseResponse = (toolUse, result) => {
+        startMessage();
+        writeClaudeEvent("content_block_start", {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: toolUse.id,
+            name: toolUse.name,
+            input: {},
+          },
+        });
+        writeClaudeEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "input_json_delta",
+            partial_json: JSON.stringify(toolUse.input || {}),
+          },
+        });
+        writeClaudeEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: 0,
+        });
+        writeClaudeEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: { output_tokens: estimateClaudeUsage(prompt, result.text).output_tokens },
+        });
+        writeClaudeEvent("message_stop", { type: "message_stop" });
+      };
+
+      const keepAliveTimer = keepAliveMs > 0
+        ? setInterval(() => {
+          if (!responseDone && responseStarted && !res.destroyed) {
+            writeClaudeEvent("ping", { type: "ping" });
+            flushResponse(res);
+          }
+        }, keepAliveMs)
+        : null;
+
+      const cancelOnClose = () => {
+        if (!responseDone) controller.abort();
+      };
+      res.on("close", cancelOnClose);
+
+      try {
+        if (shouldBufferToolResponse) startMessage();
+        else startTextBlock();
+        const result = await runDirectCompletionFromPool(prompt, model, {
+          signal: controller.signal,
+          onDelta: (delta) => {
+            if (!delta || res.destroyed) return;
+            if (shouldBufferToolResponse) return;
+            startTextBlock();
+            streamedChars += delta.length;
+            writeClaudeEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: delta },
+            });
+            flushResponse(res);
+          },
+        });
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        const toolUse = shouldBufferToolResponse ? parseClaudeToolUse(result.text, claudeToolOptions) : null;
+        finishRequest(true, {
+          outputChars: result.text.length,
+          upstreamBytes: result.bytes,
+          stringCount: result.stringCount,
+          deltaCount: result.deltaCount,
+        });
+        log("info", "claude messages response", {
+          model: displayModelId(model),
+          requestedModel,
+          stream: true,
+          outputChars: result.text.length,
+          upstreamBytes: result.bytes,
+          stringCount: result.stringCount,
+          deltaCount: result.deltaCount,
+          durationMs: result.durationMs,
+          accountId: result.accountId || "",
+        });
+
+        if (toolUse) finishToolUseResponse(toolUse, result);
+        else finishTextResponse(result);
         responseDone = true;
         res.end();
       } catch (error) {
@@ -3214,7 +3474,7 @@ async function handle(req, res) {
         const message = error instanceof Error ? error.message : String(error);
         finishRequest(false, { error: message });
         if (res.destroyed) return;
-        startStream();
+        startMessage();
         writeClaudeEvent("error", {
           type: "error",
           error: { type: "api_error", message },
@@ -3248,8 +3508,10 @@ async function handle(req, res) {
         accountId: result.accountId || "",
       });
 
-      const response = json(200, createClaudeMessage(model, result.text, prompt, {
+      const response = json(200, createClaudeMessagesResponse(model, result.text, prompt, {
         publicModel: requestedModel,
+        tools: body?.tools,
+        toolChoice: body?.tool_choice,
       }));
       res.writeHead(response.status, response.headers);
       res.end(response.body);
@@ -3426,13 +3688,17 @@ export {
   buildDirectAdminHtml,
   buildDirectAdminClientConfig,
   buildDirectAdminStatusPayload,
+  buildClaudeToolsPrompt,
   buildPromptFromClaudeMessages,
   buildPromptFromMessages,
   createLegacyDirectAccount,
   createAssistantTextAccumulator,
+  createClaudeMessageStartPayload,
+  createClaudeMessagesResponse,
   createClaudeMessage,
   createClaudeStreamEvent,
   createClaudeTokenCount,
+  createClaudeToolUseMessage,
   createConnectFrameParser,
   createCursorClientResponsesForEvents,
   createDirectMetadataCaches,
@@ -3447,6 +3713,7 @@ export {
   normalizeApiPath,
   normalizeDirectModel,
   normalizePublicModelName,
+  parseClaudeToolUse,
   pickAssistantCandidate,
   pickAssistantText,
   runDirectCompletionWithRetry,
