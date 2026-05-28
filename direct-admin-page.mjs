@@ -326,7 +326,7 @@ export function buildDirectAdminHtml() {
         <div class="subsection" id="codebuddyOAuthPanel">
           <div class="subsection-head">
             <span class="subsection-title">OAuth 登录 <span class="tag">OAUTH</span></span>
-            <span class="subsection-note">使用服务器上 CodeBuddy daemon 的 OAuth 登录态写入账号池</span>
+            <span class="subsection-note">通过 cursor-proxy 打开 CodeBuddy Web UI，完成登录后用回调链接确认导入</span>
           </div>
           <div class="split">
             <div class="field">
@@ -339,21 +339,21 @@ export function buildDirectAdminHtml() {
             </div>
           </div>
           <div class="field" style="margin-top: 12px;">
-            <label for="cbOauthUrl">授权链接（由 CodeBuddy 返回）</label>
-            <textarea id="cbOauthUrl" readonly placeholder="未生成授权链接；如果服务器已登录，可直接检查授权并导入账号"></textarea>
+            <label for="cbOauthUrl">登录入口（公网可打开）</label>
+            <textarea id="cbOauthUrl" readonly placeholder="点击生成后会显示 /direct-admin/codebuddy/oauth/launch 登录入口"></textarea>
           </div>
           <div class="field">
             <label for="cbOauthCallback">回调 URL / 授权完成结果（可选）</label>
-            <input id="cbOauthCallback" placeholder="如 CodeBuddy 返回最终跳转地址，可粘贴后检查；也可以留空直接检查服务器登录态" />
+            <input id="cbOauthCallback" placeholder="完成 CodeBuddy Web 登录后，如浏览器停在最终回调地址，可粘贴到这里；也可以留空直接检查" />
           </div>
           <div class="row" style="margin-top: 12px;">
-            <button class="primary" id="cbOauthStartBtn">生成 CodeBuddy OAuth 登录态</button>
-            <button id="cbOauthOpenBtn" type="button" disabled>打开链接</button>
+            <button class="primary" id="cbOauthStartBtn">生成 CodeBuddy 登录入口</button>
+            <button id="cbOauthOpenBtn" type="button" disabled>打开登录入口</button>
             <button id="cbOauthCopyBtn" type="button" disabled>复制链接</button>
             <button id="cbOauthCheckBtn" type="button">检查授权并导入账号</button>
           </div>
           <div class="import-hint">
-            不再要求手工填写 authToken / API Key / apiKeyHelper；确认 OAuth 登录态后写入 <code>daemon</code> 类型账号。
+            和 CPA / Cursor 登录一样：先打开授权入口，完成登录后粘贴回调地址，或留空直接检查；通过后写入 <code>daemon</code> 类型账号。
           </div>
           <div class="toast-line" id="cbOauthToast"></div>
         </div>
@@ -706,12 +706,28 @@ export function buildDirectAdminHtml() {
       }
       return text;
     }
+    function normalizeCodeBuddyOAuthCallbackUrl(value) {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      if (/^\\/direct-admin\\/codebuddy\\/oauth\\/callback(?:\\?|$)/.test(text)) return text;
+      if (!/^[a-z][a-z0-9+.-]*:\\/\\//i.test(text) && !/callback|oauth|auth|code=|state=/i.test(text)) return '';
+      try {
+        const parsed = new URL(text, window.location.origin);
+        if (parsed.pathname === '/direct-admin/codebuddy/oauth/callback') {
+          return parsed.pathname + parsed.search;
+        }
+      } catch (_e) {
+        return '';
+      }
+      return text;
+    }
     function renderCodeBuddyOAuth() {
       const payload = state.codebuddy.oauthPayload || {};
       const session = payload.session || {};
       const accounts = payload.accounts || state.codebuddy.accounts || {};
       const authStatus = session.authStatus || (state.codebuddy.status && state.codebuddy.status.authStatus) || {};
-      const url = normalizeCodeBuddyOAuthUrl(session.url || state.codebuddy.oauthUrl || '');
+      const url = normalizeCodeBuddyOAuthUrl(session.launchUrl || session.url || state.codebuddy.oauthUrl || '');
+      const callbackUrl = normalizeCodeBuddyOAuthCallbackUrl(session.callbackUrl || '');
       state.codebuddy.oauthUrl = url;
       const urlBox = $('cbOauthUrl');
       if (urlBox) urlBox.value = url;
@@ -721,9 +737,10 @@ export function buildDirectAdminHtml() {
       if (statusBox) {
         statusBox.textContent = [
           '会话: ' + (session.status || 'idle'),
-          '认证: ' + ((session.authenticated || authStatus.authenticated) ? '已完成' : '未完成'),
-          '登录态: ' + (authStatus.authEnabled === false ? '无需密码' : (authStatus.authEnabled ? '需要密码' : '未知')),
-          '回调: ' + (session.callbackUrl || '-'),
+          '登录入口: ' + (url || '-'),
+          '回调: ' + (callbackUrl || '可选，授权完成后可粘贴'),
+          'Web UI 访问: ' + (authStatus.accessAllowed ? '已允许' : '未确认'),
+          'OAuth 确认: ' + ((session.authenticated || session.status === 'complete') ? '已完成' : '未完成'),
           '错误: ' + (session.error || '-'),
           '账号: ' + ((accounts && typeof accounts === 'object') ? String(accounts.count || 0) : '0'),
         ].join('\\n');
@@ -750,12 +767,16 @@ export function buildDirectAdminHtml() {
       const loggedIn = pool && typeof pool.loggedIn === 'boolean'
         ? pool.loggedIn
         : (status.authStatus && typeof status.authStatus.authenticated === 'boolean' ? status.authStatus.authenticated : null);
+      const accessAllowed = Boolean(status.authStatus && status.authStatus.accessAllowed);
       if (unsupported) {
         authPill.textContent = '接口未启用';
         authPill.className = 'pill muted';
       } else if (loggedIn === true) {
-        authPill.textContent = '已登录';
+        authPill.textContent = '已确认';
         authPill.className = 'pill good';
+      } else if (accessAllowed) {
+        authPill.textContent = '待确认';
+        authPill.className = 'pill warn';
       } else if (loggedIn === false) {
         authPill.textContent = '未登录';
         authPill.className = 'pill warn';
@@ -923,7 +944,7 @@ export function buildDirectAdminHtml() {
         if (oauthRes && !oauthRes.__error) {
           state.codebuddy.oauthPayload = oauthRes;
           if (oauthRes.accounts) state.codebuddy.accounts = oauthRes.accounts;
-          state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(oauthRes.session && oauthRes.session.url);
+          state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(oauthRes.session && (oauthRes.session.launchUrl || oauthRes.session.url));
         }
         await loadCodeBuddyModels();
         renderCodeBuddy();
@@ -934,7 +955,7 @@ export function buildDirectAdminHtml() {
     function applyCodeBuddyOAuthResult(result) {
       const payload = result && typeof result === 'object' ? result : {};
       state.codebuddy.oauthPayload = payload;
-      state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(payload.session && payload.session.url);
+      state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(payload.session && (payload.session.launchUrl || payload.session.url));
       if (payload.accounts) state.codebuddy.accounts = payload.accounts;
       if (payload.session && payload.session.authStatus) {
         state.codebuddy.status = Object.assign({}, state.codebuddy.status || {}, {
@@ -958,8 +979,8 @@ export function buildDirectAdminHtml() {
         const session = result.session || {};
         if (state.codebuddy.oauthUrl) await copyText(state.codebuddy.oauthUrl, 'CodeBuddy OAuth 链接');
         setInlineToast('cbOauthToast', session.status === 'complete'
-          ? '✓ CodeBuddy 登录态已导入账号池。'
-          : '✓ 已触发 CodeBuddy OAuth 登录态，请在服务器上的 CodeBuddy 完成 /login 后点击检查。');
+          ? '✓ CodeBuddy OAuth 已导入账号池。'
+          : '✓ 已生成登录入口，请打开链接完成 CodeBuddy 登录后，再点击检查。');
         showToast('CodeBuddy OAuth 已启动', 'success');
       } catch (error) {
         setInlineToast('cbOauthToast', '✗ 生成失败：' + error.message);
@@ -972,18 +993,19 @@ export function buildDirectAdminHtml() {
       setInlineToast('cbOauthToast', '// 正在检查 CodeBuddy OAuth 授权...');
       $('cbOauthCheckBtn').disabled = true;
       try {
+        const callbackUrl = normalizeCodeBuddyOAuthCallbackUrl($('cbOauthCallback').value || '');
         const result = await api('/codebuddy/oauth/callback', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ callbackUrl: ($('cbOauthCallback').value || '').trim() }),
+          body: JSON.stringify({ callbackUrl }),
         });
         applyCodeBuddyOAuthResult(result);
         const session = result.session || {};
         if (result.ok) {
-          setInlineToast('cbOauthToast', '✓ CodeBuddy OAuth 已完成并导入账号池。');
+          setInlineToast('cbOauthToast', '✓ CodeBuddy OAuth 已导入账号池。');
           showToast('CodeBuddy OAuth 账号已导入', 'success');
         } else {
-          setInlineToast('cbOauthToast', '尚未完成授权，请在服务器上的 CodeBuddy 终端完成 /login 后重试。');
+          setInlineToast('cbOauthToast', '尚未完成授权，请先在 CodeBuddy Web UI 登录后重试。');
         }
         if (session.error && !result.ok) {
           setInlineToast('cbOauthToast', '✗ 检查失败：' + session.error);

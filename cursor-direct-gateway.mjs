@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from "node:http";
+import net from "node:net";
 import http2 from "node:http2";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -7,6 +8,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { Readable } from "node:stream";
 import zlib from "node:zlib";
 import { buildDirectAdminHtml } from "./direct-admin-page.mjs";
 import {
@@ -94,6 +96,7 @@ const startedAt = Date.now();
 const OAUTH_URL_TIMEOUT_MS = 10000;
 const OAUTH_COMPLETE_TIMEOUT_MS = Number(process.env.CURSOR_DIRECT_OAUTH_TIMEOUT_MS || "180000");
 const OAUTH_POLL_INTERVAL_MS = 2000;
+const CODEBUDDY_OAUTH_SESSION_TTL_MS = Number(process.env.CURSOR_DIRECT_CODEBUDDY_OAUTH_TTL_MS || "900000");
 const UTF8_TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const CONNECT_COMPRESSION_FLAG = 0x01;
 const CONNECT_END_STREAM_FLAG = 0x02;
@@ -469,10 +472,13 @@ function createCodeBuddyOAuthSessionState() {
     provider: "codebuddy",
     status: "idle",
     url: "",
+    launchUrl: "",
+    accessUrl: "",
     callbackUrl: "",
     startedAt: 0,
     updatedAt: 0,
     completedAt: 0,
+    confirmedAt: 0,
     error: "",
     authStatus: null,
     login: null,
@@ -888,20 +894,29 @@ function compactText(value) {
 
 function normalizeCodeBuddyLoginStatus(value = {}) {
   const source = value && typeof value === "object" ? value : {};
-  const authenticated = Boolean(
+  const authEnabled = typeof source.authEnabled === "boolean"
+    ? source.authEnabled
+    : typeof source.auth_enabled === "boolean"
+      ? source.auth_enabled
+      : null;
+  const rawAuthenticated = Boolean(
     source.authenticated === true ||
     source.loggedIn === true ||
     source.logged_in === true ||
     source.success === true,
   );
+  const accessAllowed = authEnabled === false || rawAuthenticated;
+  const authenticated = authEnabled === false ? false : rawAuthenticated;
   return {
-    authEnabled: typeof source.authEnabled === "boolean" ? source.authEnabled : Boolean(source.auth_enabled),
+    authEnabled,
     authenticated,
     loggedIn: authenticated,
+    accessAllowed,
     message: compactText(source.message || source.statusMessage || source.error || source.note || ""),
     raw: {
-      authEnabled: typeof source.authEnabled === "boolean" ? source.authEnabled : Boolean(source.auth_enabled),
-      authenticated,
+      authEnabled,
+      authenticated: rawAuthenticated,
+      accessAllowed,
     },
   };
 }
@@ -926,6 +941,20 @@ function normalizeCodeBuddyLoginUrl(value) {
   return text;
 }
 
+function isCodeBuddyOAuthSessionActive(session = codeBuddyOAuthSession, now = Date.now()) {
+  const source = session && typeof session === "object" ? session : {};
+  const startedAt = Number(source.startedAt || 0);
+  if (!startedAt) return false;
+  if (now - startedAt > CODEBUDDY_OAUTH_SESSION_TTL_MS) return false;
+  return Boolean(source.id && source.token);
+}
+
+function buildCodeBuddyRemoteUrl(options = {}) {
+  const origin = compactText(options.publicOrigin || "").replace(/\/+$/, "");
+  const path = "/codebuddy/";
+  return origin ? `${origin}${path}` : path;
+}
+
 function isCodeBuddyOAuthLaunchUrl(value) {
   try {
     const parsed = new URL(String(value || "").trim(), "http://localhost");
@@ -942,6 +971,72 @@ function buildCodeBuddyOAuthLaunchUrl(options = {}) {
   const path = `/direct-admin/codebuddy/oauth/launch?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`;
   const origin = compactText(options.publicOrigin || "").replace(/\/+$/, "");
   return origin ? `${origin}${path}` : path;
+}
+
+function buildCodeBuddyOAuthCallbackUrl(options = {}) {
+  const id = compactText(options.id || codeBuddyOAuthSession.id);
+  const token = compactText(options.token || codeBuddyOAuthSession.token);
+  if (!id || !token) return "";
+  const path = `/direct-admin/codebuddy/oauth/callback?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`;
+  const origin = compactText(options.publicOrigin || "").replace(/\/+$/, "");
+  return origin ? `${origin}${path}` : path;
+}
+
+function parseCodeBuddyOAuthCallbackUrl(value, expected = codeBuddyOAuthSession) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return { ok: false, reason: "empty callback url" };
+  }
+  let parsed;
+  try {
+    parsed = new URL(text, "http://localhost");
+  } catch {
+    return { ok: false, reason: "invalid callback url" };
+  }
+  if (parsed.pathname !== "/direct-admin/codebuddy/oauth/callback") {
+    return { ok: false, reason: "unexpected callback path" };
+  }
+  const id = compactText(parsed.searchParams.get("id") || "");
+  const token = compactText(parsed.searchParams.get("token") || "");
+  const expectedId = compactText(expected?.id || "");
+  const expectedToken = compactText(expected?.token || "");
+  if (!expectedId || !expectedToken) {
+    return { ok: false, reason: "oauth session is not active" };
+  }
+  if (!id || !token) {
+    return { ok: false, reason: "callback token missing" };
+  }
+  if (id !== expectedId) {
+    return { ok: false, reason: "callback session mismatch" };
+  }
+  if (token !== expectedToken) {
+    return { ok: false, reason: "callback token mismatch" };
+  }
+  if (Number(expected?.startedAt || 0) && !isCodeBuddyOAuthSessionActive(expected)) {
+    return { ok: false, reason: "oauth session expired" };
+  }
+  return { ok: true, id, token };
+}
+
+function parseCodeBuddyManualCallbackUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return { ok: false, reason: "empty callback url" };
+  let parsed;
+  try {
+    parsed = new URL(text, "http://localhost");
+  } catch {
+    return { ok: false, reason: "invalid callback url" };
+  }
+  const error = compactText(parsed.searchParams.get("error") || parsed.searchParams.get("error_description") || "");
+  if (error) {
+    return { ok: false, reason: error };
+  }
+  const absolute = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  const callbackLike = /callback|oauth|auth|code=|state=/i.test(text);
+  if (!absolute && !callbackLike) {
+    return { ok: false, reason: "callback url is not recognizable" };
+  }
+  return { ok: true, url: text };
 }
 
 function normalizeCodeBuddySessionUrl(value, options = {}) {
@@ -989,11 +1084,16 @@ function summarizeCodeBuddyLoginResponse(value = {}) {
 }
 
 function buildCodeBuddyOAuthSessionResponse(options = {}) {
-  const sessionUrl = normalizeCodeBuddySessionUrl(codeBuddyOAuthSession.url, {
+  const launchUrl = buildCodeBuddyOAuthLaunchUrl({
     publicOrigin: options.publicOrigin,
     id: codeBuddyOAuthSession.id,
     token: codeBuddyOAuthSession.token,
   });
+  const sessionUrl = normalizeCodeBuddySessionUrl(codeBuddyOAuthSession.url || launchUrl, {
+    publicOrigin: options.publicOrigin,
+    id: codeBuddyOAuthSession.id,
+    token: codeBuddyOAuthSession.token,
+  }) || launchUrl;
   const login = codeBuddyOAuthSession.login && typeof codeBuddyOAuthSession.login === "object"
     ? {
       success: Boolean(codeBuddyOAuthSession.login.success),
@@ -1009,17 +1109,20 @@ function buildCodeBuddyOAuthSessionResponse(options = {}) {
     id: codeBuddyOAuthSession.id,
     provider: codeBuddyOAuthSession.provider,
     status: codeBuddyOAuthSession.status,
-    url: sessionUrl,
+    url: launchUrl || sessionUrl,
+    launchUrl: launchUrl || sessionUrl,
+    accessUrl: codeBuddyOAuthSession.accessUrl || buildCodeBuddyRemoteUrl({ publicOrigin: options.publicOrigin }),
     callbackUrl: codeBuddyOAuthSession.callbackUrl,
     startedAt: codeBuddyOAuthSession.startedAt,
     updatedAt: codeBuddyOAuthSession.updatedAt,
     completedAt: codeBuddyOAuthSession.completedAt,
+    confirmedAt: codeBuddyOAuthSession.confirmedAt,
     error: codeBuddyOAuthSession.error,
     authStatus: codeBuddyOAuthSession.authStatus,
     login,
     label: codeBuddyOAuthSession.label,
     running: false,
-    authenticated: Boolean(options.authenticated ?? codeBuddyOAuthSession.authStatus?.authenticated),
+    authenticated: Boolean(options.authenticated ?? (codeBuddyOAuthSession.status === "complete")),
   };
 }
 
@@ -1034,7 +1137,7 @@ function escapeHtmlText(value) {
 }
 
 function buildCodeBuddyOAuthLaunchPage(message, options = {}) {
-  const redirectUrl = normalizeCodeBuddySessionUrl(codeBuddyOAuthSession.url, {
+  const launchUrl = buildCodeBuddyOAuthLaunchUrl({
     publicOrigin: options.publicOrigin,
     id: codeBuddyOAuthSession.id,
     token: codeBuddyOAuthSession.token,
@@ -1051,8 +1154,9 @@ function buildCodeBuddyOAuthLaunchPage(message, options = {}) {
     "<body>",
     "  <h1>CodeBuddy OAuth</h1>",
     `  <p>${escapeHtmlText(message || "")}</p>`,
-    redirectUrl && redirectUrl !== codeBuddyOAuthSession.url ? `  <p class="muted">打开后将继续跳转到：${escapeHtmlText(redirectUrl)}</p>` : "",
-    `  <a href="/direct-admin/#codebuddy">返回管理台</a>`,
+    launchUrl ? `  <p class="muted">登录入口：<a href="${escapeHtmlText(launchUrl)}">${escapeHtmlText(launchUrl)}</a></p>` : "",
+    `  <p class="muted">授权完成后回到管理台，粘贴最终回调地址或直接点击检查。</p>`,
+    `  <p><a href="/direct-admin/#codebuddy">返回管理台</a></p>`,
     "</body>",
     "</html>",
   ].filter(Boolean).join("\n");
@@ -1065,6 +1169,8 @@ function getCodeBuddyDaemonAccountId(baseUrl) {
 
 function createCodeBuddyDaemonAccount(authStatus, options = {}) {
   const baseUrl = normalizeCodeBuddyBaseUrl(options.baseUrl || config.codeBuddyBaseUrl);
+  const normalizedAuthStatus = normalizeCodeBuddyLoginStatus(authStatus);
+  const confirmed = Boolean(options.confirmed);
   return {
     id: getCodeBuddyDaemonAccountId(baseUrl),
     label: compactText(options.label || "CodeBuddy OAuth"),
@@ -1073,7 +1179,14 @@ function createCodeBuddyDaemonAccount(authStatus, options = {}) {
     authType: "daemon",
     useDaemonAuth: true,
     enabled: true,
-    authStatus: normalizeCodeBuddyLoginStatus(authStatus),
+    authStatus: {
+      ...normalizedAuthStatus,
+      loggedIn: confirmed || Boolean(normalizedAuthStatus.loggedIn),
+      authenticated: confirmed || Boolean(normalizedAuthStatus.authenticated),
+      accessAllowed: Boolean(normalizedAuthStatus.accessAllowed),
+      authMode: confirmed ? "daemon_oauth" : normalizedAuthStatus.raw?.authMode || "daemon",
+      confirmedAt: confirmed ? Date.now() : 0,
+    },
   };
 }
 
@@ -1150,12 +1263,7 @@ async function getCodeBuddyOAuthSessionPayload(options = {}) {
   let authStatus = null;
   try {
     authStatus = await fetchCodeBuddyAuthStatus();
-    if (authStatus.authenticated) {
-      codeBuddyOAuthSession.authStatus = authStatus;
-      codeBuddyOAuthSession.status = codeBuddyOAuthSession.status === "complete" ? "complete" : "ready";
-      codeBuddyOAuthSession.error = "";
-      codeBuddyOAuthSession.login = codeBuddyOAuthSession.login || { success: true, message: "已检测到 CodeBuddy 登录态", url: "" };
-    }
+    codeBuddyOAuthSession.authStatus = authStatus;
   } catch (error) {
     codeBuddyOAuthSession.error = error instanceof Error ? error.message : String(error);
   }
@@ -1174,81 +1282,142 @@ async function getCodeBuddyOAuthSessionPayload(options = {}) {
 }
 
 async function startCodeBuddyOAuthSession(options = {}) {
-  if (codeBuddyOAuthSession.status === "starting" || codeBuddyOAuthSession.status === "waiting") {
-    return waitForCodeBuddyOAuthCompletion("", { publicOrigin: options.publicOrigin });
+  if ((codeBuddyOAuthSession.status === "starting" || codeBuddyOAuthSession.status === "waiting") &&
+    isCodeBuddyOAuthSessionActive(codeBuddyOAuthSession)) {
+    return getCodeBuddyOAuthSessionPayload({ fresh: true, publicOrigin: options.publicOrigin });
   }
   codeBuddyOAuthSession = createCodeBuddyOAuthSessionState();
   codeBuddyOAuthSession.id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   codeBuddyOAuthSession.token = randomUUID();
-  codeBuddyOAuthSession.status = "starting";
+  codeBuddyOAuthSession.status = "waiting";
   codeBuddyOAuthSession.startedAt = Date.now();
   codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.startedAt;
   codeBuddyOAuthSession.label = compactText(options.label || "CodeBuddy OAuth");
-  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-  const login = await triggerCodeBuddyAuthLogin();
-  const launchUrl = buildCodeBuddyOAuthLaunchUrl({
+  codeBuddyOAuthSession.launchUrl = buildCodeBuddyOAuthLaunchUrl({
     publicOrigin: options.publicOrigin,
     id: codeBuddyOAuthSession.id,
     token: codeBuddyOAuthSession.token,
   });
-  codeBuddyOAuthSession.login = {
-    ...login,
-    url: normalizeCodeBuddySessionUrl(login.url || "", {
-      publicOrigin: options.publicOrigin,
-      id: codeBuddyOAuthSession.id,
-      token: codeBuddyOAuthSession.token,
-    }) || launchUrl,
-  };
-  codeBuddyOAuthSession.url = codeBuddyOAuthSession.login.url || launchUrl;
-  codeBuddyOAuthSession.status = login.success ? "waiting" : "failed";
-  codeBuddyOAuthSession.updatedAt = Date.now();
-  codeBuddyOAuthSession.error = login.message || "";
+  codeBuddyOAuthSession.accessUrl = buildCodeBuddyRemoteUrl({ publicOrigin: options.publicOrigin });
+  codeBuddyOAuthSession.url = codeBuddyOAuthSession.launchUrl;
   clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-  return waitForCodeBuddyOAuthCompletion("", { publicOrigin: options.publicOrigin });
+
+  try {
+    const login = await triggerCodeBuddyAuthLogin();
+    const externalUrl = normalizeCodeBuddyExternalLoginUrl(login.url || "");
+    codeBuddyOAuthSession.login = {
+      ...login,
+      url: externalUrl || codeBuddyOAuthSession.launchUrl,
+      externalUrl,
+    };
+    codeBuddyOAuthSession.error = login.message || "";
+  } catch (error) {
+    codeBuddyOAuthSession.login = {
+      success: false,
+      message: error instanceof Error ? error.message : String(error),
+      url: codeBuddyOAuthSession.launchUrl,
+    };
+    codeBuddyOAuthSession.error = codeBuddyOAuthSession.login.message;
+  }
+
+  codeBuddyOAuthSession.updatedAt = Date.now();
+  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  return getCodeBuddyOAuthSessionPayload({ fresh: true, publicOrigin: options.publicOrigin });
 }
 
 async function waitForCodeBuddyOAuthCompletion(callbackUrl = "", options = {}) {
-  if (callbackUrl) {
-    codeBuddyOAuthSession.callbackUrl = String(callbackUrl).trim();
+  const rawCallbackUrl = String(callbackUrl || "").trim();
+  const tokenCallback = rawCallbackUrl
+    ? parseCodeBuddyOAuthCallbackUrl(rawCallbackUrl, codeBuddyOAuthSession)
+    : { ok: false, reason: "empty callback url" };
+  const manualCallback = rawCallbackUrl && !tokenCallback.ok
+    ? parseCodeBuddyManualCallbackUrl(rawCallbackUrl)
+    : { ok: false, reason: "empty callback url" };
+  const callbackConfirmed = Boolean(rawCallbackUrl && (tokenCallback.ok || manualCallback.ok));
+
+  if (rawCallbackUrl && !callbackConfirmed) {
+    codeBuddyOAuthSession.status = codeBuddyOAuthSession.status === "complete" ? "complete" : "waiting";
+    codeBuddyOAuthSession.error = `CodeBuddy OAuth 回调无效：${manualCallback.reason || tokenCallback.reason}`;
     codeBuddyOAuthSession.updatedAt = Date.now();
     clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-  }
-  const authStatus = await fetchCodeBuddyAuthStatus();
-  codeBuddyOAuthSession.authStatus = authStatus;
-  if (authStatus.authenticated) {
-    const imported = importCodeBuddyDaemonAccount(authStatus, {
-      label: codeBuddyOAuthSession.label || "CodeBuddy OAuth",
-    });
-    codeBuddyOAuthSession.status = "complete";
-    codeBuddyOAuthSession.completedAt = Date.now();
-    codeBuddyOAuthSession.error = "";
-    codeBuddyOAuthSession.updatedAt = Date.now();
-    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
     return {
-      ok: true,
+      ok: false,
       provider: "codebuddy",
       session: buildCodeBuddyOAuthSessionResponse({
         publicOrigin: options.publicOrigin,
-        authenticated: true,
+        authenticated: codeBuddyOAuthSession.status === "complete",
       }),
-      accounts: imported.accounts,
-      account: imported.account,
+      accounts,
+      account: accounts.primary,
     };
   }
-  codeBuddyOAuthSession.status = "waiting";
-  codeBuddyOAuthSession.error = "尚未检测到 CodeBuddy 登录态，请在服务器上的 CodeBuddy 终端完成 /login 后重试";
+
+  if (callbackConfirmed) {
+    codeBuddyOAuthSession.callbackUrl = rawCallbackUrl;
+    codeBuddyOAuthSession.confirmedAt = Date.now();
+    codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.confirmedAt;
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  }
+
+  let authStatus = null;
+  try {
+    authStatus = await fetchCodeBuddyAuthStatus();
+  } catch (error) {
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.error = `CodeBuddy daemon 不可访问：${error instanceof Error ? error.message : String(error)}`;
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+    return {
+      ok: false,
+      provider: "codebuddy",
+      session: buildCodeBuddyOAuthSessionResponse({
+        publicOrigin: options.publicOrigin,
+        authenticated: false,
+      }),
+      accounts,
+      account: accounts.primary,
+    };
+  }
+
+  codeBuddyOAuthSession.authStatus = authStatus;
+  if (!callbackConfirmed && !authStatus.authenticated) {
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.error = "尚未检测到 CodeBuddy 账号登录态；请完成 Web 登录后重试，或粘贴授权后的回调地址。";
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+    return {
+      ok: false,
+      provider: "codebuddy",
+      session: buildCodeBuddyOAuthSessionResponse({
+        publicOrigin: options.publicOrigin,
+        authenticated: false,
+      }),
+      accounts,
+      account: accounts.primary,
+    };
+  }
+
+  const imported = importCodeBuddyDaemonAccount(authStatus, {
+    label: codeBuddyOAuthSession.label || "CodeBuddy OAuth",
+    confirmed: true,
+  });
+  codeBuddyOAuthSession.status = "complete";
+  codeBuddyOAuthSession.completedAt = Date.now();
+  codeBuddyOAuthSession.error = "";
   codeBuddyOAuthSession.updatedAt = Date.now();
   clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-  const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
   return {
-    ok: false,
+    ok: true,
     provider: "codebuddy",
     session: buildCodeBuddyOAuthSessionResponse({
       publicOrigin: options.publicOrigin,
-      authenticated: false,
+      authenticated: true,
     }),
-    accounts,
-    account: accounts.primary,
+    accounts: imported.accounts,
+    account: imported.account,
   };
 }
 
@@ -3440,7 +3609,254 @@ function getCodeBuddyOAuthToken(req) {
 
 function isCodeBuddyOAuthLaunchAuthorized(req) {
   const token = getCodeBuddyOAuthToken(req);
-  return Boolean(token && codeBuddyOAuthSession.token && token === codeBuddyOAuthSession.token && codeBuddyOAuthSession.id);
+  return Boolean(
+    token &&
+    codeBuddyOAuthSession.token &&
+    token === codeBuddyOAuthSession.token &&
+    codeBuddyOAuthSession.id &&
+    isCodeBuddyOAuthSessionActive(codeBuddyOAuthSession),
+  );
+}
+
+function isCodeBuddyProxyPath(routePath) {
+  return routePath === "/codebuddy" ||
+    routePath.startsWith("/codebuddy/") ||
+    routePath === "/login" ||
+    routePath.startsWith("/login/") ||
+    routePath === "/auth" ||
+    routePath.startsWith("/auth/") ||
+    routePath === "/oauth" ||
+    routePath.startsWith("/oauth/") ||
+    routePath === "/assets" ||
+    routePath.startsWith("/assets/") ||
+    routePath === "/logo.svg" ||
+    routePath === "/manifest.webmanifest" ||
+    routePath === "/favicon.ico" ||
+    routePath === "/favicon.svg" ||
+    routePath === "/sw.js" ||
+    routePath === "/api/v1" ||
+    routePath.startsWith("/api/v1/") ||
+    routePath === "/ws" ||
+    routePath.startsWith("/ws/");
+}
+
+function buildCodeBuddyProxyTargetPath(routePath) {
+  if (routePath === "/codebuddy") return "/";
+  if (routePath.startsWith("/codebuddy/")) return routePath.slice("/codebuddy".length) || "/";
+  return routePath;
+}
+
+function buildCodeBuddyProxyTargetUrl(url) {
+  const routePath = normalizeApiPath(url.pathname);
+  if (!isCodeBuddyProxyPath(routePath)) return null;
+  const baseUrl = normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl);
+  const target = new URL(baseUrl);
+  target.pathname = buildCodeBuddyProxyTargetPath(routePath);
+  target.search = url.search;
+  target.hash = "";
+  return target;
+}
+
+function createCodeBuddyProxyRequestHeaders(req, targetUrl) {
+  const headers = {};
+  for (const [key, value] of Object.entries(req.headers || {})) {
+    const lower = key.toLowerCase();
+    if (lower === "host" || lower === "content-length" || lower === "connection" || lower === "upgrade" || lower === "proxy-connection") {
+      continue;
+    }
+    if (lower === "x-admin-password") {
+      continue;
+    }
+    if (lower === "authorization" && isDirectAdminAuthorized({ headers: { authorization: value } })) {
+      continue;
+    }
+    headers[key] = Array.isArray(value) ? value.join(", ") : String(value);
+  }
+  return headers;
+}
+
+function rewriteCodeBuddyLocationHeader(location, targetUrl, publicOrigin) {
+  const text = String(location || "").trim();
+  if (!text) return "";
+  try {
+    const parsed = new URL(text, targetUrl);
+    if (parsed.origin === targetUrl.origin || parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "0.0.0.0" || parsed.hostname === "::1") {
+      if (parsed.pathname === "/") return "/codebuddy/";
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+    if (publicOrigin) {
+      const publicBase = new URL(publicOrigin);
+      if (parsed.origin === publicBase.origin) {
+        return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+    }
+  } catch {
+    return text;
+  }
+  return text;
+}
+
+function createCodeBuddyProxyResponseHeaders(upstreamResponse, targetUrl, publicOrigin) {
+  const headers = {};
+  upstreamResponse.headers.forEach((value, key) => {
+    const lower = key.toLowerCase();
+    if (lower === "content-length" || lower === "connection" || lower === "keep-alive" || lower === "transfer-encoding" || lower === "content-encoding" || lower === "upgrade") {
+      return;
+    }
+    if (lower === "location") {
+      headers.location = rewriteCodeBuddyLocationHeader(value, targetUrl, publicOrigin);
+      return;
+    }
+    if (lower === "set-cookie") return;
+    headers[key] = value;
+  });
+  const setCookies = typeof upstreamResponse.headers.getSetCookie === "function"
+    ? upstreamResponse.headers.getSetCookie()
+    : [];
+  if (setCookies.length > 0) {
+    headers["set-cookie"] = setCookies;
+  }
+  return headers;
+}
+
+async function handleCodeBuddyRemoteProxy(req, res, url) {
+  if (!isCodeBuddyOAuthLaunchAuthorized(req)) {
+    const response = openAiError(401, "authentication_error", "CodeBuddy OAuth session required");
+    res.writeHead(response.status, response.headers);
+    res.end(response.body);
+    return;
+  }
+
+  const targetUrl = buildCodeBuddyProxyTargetUrl(url);
+  if (!targetUrl) {
+    const response = openAiError(404, "not_found_error", `Unsupported CodeBuddy proxy path: ${url.pathname}`);
+    res.writeHead(response.status, response.headers);
+    res.end(response.body);
+    return;
+  }
+
+  const publicOrigin = getPublicOrigin(req);
+  const headers = createCodeBuddyProxyRequestHeaders(req, targetUrl);
+  const method = String(req.method || "GET").toUpperCase();
+  const upstream = await fetch(targetUrl, {
+    method,
+    headers,
+    body: method === "GET" || method === "HEAD" ? undefined : req,
+    duplex: method === "GET" || method === "HEAD" ? undefined : "half",
+    redirect: "manual",
+  });
+
+  const responseHeaders = createCodeBuddyProxyResponseHeaders(upstream, targetUrl, publicOrigin);
+  res.writeHead(upstream.status, responseHeaders);
+  if (method === "HEAD" || !upstream.body) {
+    res.end();
+    return;
+  }
+
+  const reader = Readable.fromWeb(upstream.body);
+  reader.on("error", (error) => {
+    if (!res.writableEnded) res.destroy(error);
+  });
+  reader.pipe(res);
+}
+
+function createCodeBuddyUpgradeHeaders(req, targetUrl) {
+  const headers = {};
+  for (const [key, value] of Object.entries(req.headers || {})) {
+    const lower = key.toLowerCase();
+    if (lower === "host" || lower === "x-admin-password") continue;
+    if (lower === "authorization" && isDirectAdminAuthorized({ headers: { authorization: value } })) continue;
+    headers[key] = Array.isArray(value) ? value.join(", ") : String(value);
+  }
+  headers.host = targetUrl.host;
+  headers.connection = headers.connection || "Upgrade";
+  headers.upgrade = headers.upgrade || "websocket";
+  return headers;
+}
+
+function writeUpgradeError(socket, status, message) {
+  if (socket.destroyed) return;
+  socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
+}
+
+function handleCodeBuddyRemoteUpgrade(req, socket, head) {
+  let url;
+  try {
+    url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  } catch {
+    writeUpgradeError(socket, 400, "Bad Request");
+    return;
+  }
+
+  const routePath = normalizeApiPath(url.pathname);
+  if (!isCodeBuddyProxyPath(routePath)) {
+    writeUpgradeError(socket, 404, "Not Found");
+    return;
+  }
+  if (!isCodeBuddyOAuthLaunchAuthorized(req)) {
+    writeUpgradeError(socket, 401, "Unauthorized");
+    return;
+  }
+
+  const targetUrl = buildCodeBuddyProxyTargetUrl(url);
+  if (!targetUrl || targetUrl.protocol !== "http:") {
+    writeUpgradeError(socket, 502, "Bad Gateway");
+    return;
+  }
+
+  const upstream = net.connect({
+    host: targetUrl.hostname,
+    port: Number(targetUrl.port || 80),
+  });
+  const closeBoth = () => {
+    if (!socket.destroyed) socket.destroy();
+    if (!upstream.destroyed) upstream.destroy();
+  };
+
+  upstream.once("connect", () => {
+    const targetPath = `${targetUrl.pathname}${targetUrl.search}`;
+    upstream.write(`${req.method || "GET"} ${targetPath} HTTP/${req.httpVersion || "1.1"}\r\n`);
+    for (const [key, value] of Object.entries(createCodeBuddyUpgradeHeaders(req, targetUrl))) {
+      upstream.write(`${key}: ${value}\r\n`);
+    }
+    upstream.write("\r\n");
+    if (head && head.length) upstream.write(head);
+    socket.pipe(upstream);
+    upstream.pipe(socket);
+  });
+  upstream.once("error", () => writeUpgradeError(socket, 502, "Bad Gateway"));
+  socket.once("error", closeBoth);
+  socket.once("close", closeBoth);
+  upstream.once("close", closeBoth);
+}
+
+async function handleCodeBuddyOAuthCallback(req, res, url) {
+  const publicOrigin = getPublicOrigin(req);
+  try {
+    const result = await waitForCodeBuddyOAuthCompletion(url.toString(), { publicOrigin });
+    const message = result.ok
+      ? "CodeBuddy OAuth 已确认，账号已导入账号池。"
+      : result.session?.error || codeBuddyOAuthSession.error || "CodeBuddy OAuth 尚未完成。";
+    const response = buildCodeBuddyOAuthLaunchPage(message, { publicOrigin });
+    res.writeHead(result.ok ? 200 : 409, {
+      ...response.headers,
+      "cache-control": "no-store",
+      "set-cookie": `cursor_codebuddy_oauth=${encodeURIComponent(codeBuddyOAuthSession.token || "")}; Path=/; Max-Age=900; HttpOnly; SameSite=Lax`,
+    });
+    res.end(response.body);
+  } catch (error) {
+    const response = buildCodeBuddyOAuthLaunchPage(
+      `CodeBuddy OAuth 回调失败：${error instanceof Error ? error.message : String(error)}`,
+      { publicOrigin },
+    );
+    res.writeHead(500, {
+      ...response.headers,
+      "cache-control": "no-store",
+      "set-cookie": `cursor_codebuddy_oauth=${encodeURIComponent(codeBuddyOAuthSession.token || "")}; Path=/; Max-Age=900; HttpOnly; SameSite=Lax`,
+    });
+    res.end(response.body);
+  }
 }
 
 function getPublicOrigin(req) {
@@ -3494,65 +3910,38 @@ async function handleCodeBuddyOAuthLaunch(req, res, url) {
   }
 
   try {
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.launchUrl ||= buildCodeBuddyOAuthLaunchUrl({ publicOrigin, id, token });
+    codeBuddyOAuthSession.accessUrl = buildCodeBuddyRemoteUrl({ publicOrigin });
+    codeBuddyOAuthSession.callbackUrl ||= buildCodeBuddyOAuthCallbackUrl({ publicOrigin, id, token });
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.updatedAt = Date.now();
+
     let login = codeBuddyOAuthSession.login;
-    let loginUrl = normalizeCodeBuddyExternalLoginUrl(login?.url || "");
+    let loginUrl = normalizeCodeBuddyExternalLoginUrl(login?.externalUrl || login?.url || "");
     if (!loginUrl) {
-      login = await triggerCodeBuddyAuthLogin();
+      login = await triggerCodeBuddyAuthLogin().catch((error) => ({
+        success: false,
+        message: error instanceof Error ? error.message : String(error),
+        url: "",
+      }));
       loginUrl = normalizeCodeBuddyExternalLoginUrl(login.url || "");
       codeBuddyOAuthSession.login = {
         ...login,
-        url: loginUrl || buildCodeBuddyOAuthLaunchUrl({ publicOrigin, id, token }),
+        url: loginUrl || codeBuddyOAuthSession.launchUrl,
+        externalUrl: loginUrl,
       };
-      if (loginUrl) codeBuddyOAuthSession.url = loginUrl;
-      codeBuddyOAuthSession.updatedAt = Date.now();
-      clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+      codeBuddyOAuthSession.error = login.success ? "" : (login.message || "");
     }
 
-    if (loginUrl) {
-      res.writeHead(302, {
-        location: loginUrl,
-        "set-cookie": setCookie,
-      });
-      res.end();
-      return;
-    }
-
-    const authStatus = await fetchCodeBuddyAuthStatus();
-    codeBuddyOAuthSession.authStatus = authStatus;
-    if (authStatus.authenticated) {
-      importCodeBuddyDaemonAccount(authStatus, {
-        label: codeBuddyOAuthSession.label || "CodeBuddy OAuth",
-      });
-      codeBuddyOAuthSession.status = "complete";
-      codeBuddyOAuthSession.completedAt = Date.now();
-      codeBuddyOAuthSession.error = "";
-      codeBuddyOAuthSession.updatedAt = Date.now();
-      clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-      const response = buildCodeBuddyOAuthLaunchPage(
-        "服务器上的 CodeBuddy daemon 已经完成登录，账号已写入账号池。你可以回到管理台刷新或直接运行探针。",
-        { publicOrigin },
-      );
-      res.writeHead(response.status, {
-        ...response.headers,
-        "set-cookie": setCookie,
-      });
-      res.end(response.body);
-      return;
-    }
-
-    codeBuddyOAuthSession.status = "waiting";
-    codeBuddyOAuthSession.error = "CodeBuddy daemon 尚未返回可点击的 OAuth 链接";
-    codeBuddyOAuthSession.updatedAt = Date.now();
     clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-    const response = buildCodeBuddyOAuthLaunchPage(
-      "已向 CodeBuddy daemon 发起登录请求，但 daemon 没有返回可点击的授权 URL。\n请确认 CodeBuddy 版本支持 Web OAuth 链接，或在服务器终端完成 codebuddy 登录后回到管理台点击“检查授权并导入账号”。",
-      { publicOrigin },
-    );
-    res.writeHead(response.status, {
-      ...response.headers,
+
+    res.writeHead(302, {
+      location: loginUrl || buildCodeBuddyRemoteUrl({ publicOrigin: "" }),
       "set-cookie": setCookie,
+      "cache-control": "no-store",
     });
-    res.end(response.body);
+    res.end();
   } catch (error) {
     codeBuddyOAuthSession.status = "failed";
     codeBuddyOAuthSession.error = error instanceof Error ? error.message : String(error);
@@ -3707,6 +4096,21 @@ async function handle(req, res) {
 
   if (routePath === "/direct-admin/codebuddy/oauth/launch" && (req.method === "GET" || req.method === "HEAD")) {
     await handleCodeBuddyOAuthLaunch(req, res, url);
+    return;
+  }
+
+  if (routePath === "/direct-admin/codebuddy/oauth/callback" && (req.method === "GET" || req.method === "HEAD")) {
+    await handleCodeBuddyOAuthCallback(req, res, url);
+    return;
+  }
+
+  if (
+    routePath === "/codebuddy" ||
+    routePath.startsWith("/codebuddy/") ||
+    routePath.startsWith("/api/v1/") ||
+    isCodeBuddyProxyPath(routePath)
+  ) {
+    await handleCodeBuddyRemoteProxy(req, res, url);
     return;
   }
 
@@ -5073,7 +5477,9 @@ export {
   normalizeApiPath,
   normalizeDirectModel,
   normalizePublicModelName,
+  normalizeCodeBuddyLoginStatus,
   parseClaudeToolUse,
+  parseCodeBuddyOAuthCallbackUrl,
   pickAssistantCandidate,
   pickAssistantText,
   resolveGatewayProviderModel,
@@ -5098,6 +5504,15 @@ if (import.meta.url === argvEntrypoint) {
       res.writeHead(response.status, response.headers);
       res.end(response.body);
     });
+  });
+  server.on("upgrade", (req, socket, head) => {
+    try {
+      handleCodeBuddyRemoteUpgrade(req, socket, head);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log("error", "Unhandled upgrade error", { message });
+      if (!socket.destroyed) socket.destroy();
+    }
   });
 
   server.listen(config.port, config.host, () => {

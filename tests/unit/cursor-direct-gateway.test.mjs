@@ -36,6 +36,8 @@ import {
   runDirectCompletionWithRetry,
   selectDirectAccount,
   setMetadataCache,
+  normalizeCodeBuddyLoginStatus,
+  parseCodeBuddyOAuthCallbackUrl,
   summarizeCodeBuddyLoginResponse,
   summarizeCursorAuth,
   summarizeDirectAccount,
@@ -895,6 +897,36 @@ test("CodeBuddy OAuth login response ignores daemon base URLs", () => {
   );
 });
 
+test("CodeBuddy daemon auth status does not imply OAuth completion when auth is disabled", () => {
+  const status = normalizeCodeBuddyLoginStatus({
+    authEnabled: false,
+    authenticated: true,
+  });
+
+  assert.equal(status.authEnabled, false);
+  assert.equal(status.authenticated, false);
+  assert.equal(status.loggedIn, false);
+  assert.equal(status.accessAllowed, true);
+});
+
+test("CodeBuddy OAuth callback URLs must match the pending session token", () => {
+  assert.deepEqual(
+    parseCodeBuddyOAuthCallbackUrl(
+      "https://proxy.example.com/direct-admin/codebuddy/oauth/callback?id=s1&token=t1",
+      { id: "s1", token: "t1" },
+    ),
+    { ok: true, id: "s1", token: "t1" },
+  );
+
+  assert.equal(
+    parseCodeBuddyOAuthCallbackUrl(
+      "/direct-admin/codebuddy/oauth/callback?id=s1&token=wrong",
+      { id: "s1", token: "t1" },
+    ).ok,
+    false,
+  );
+});
+
 test("CodeBuddy OAuth session does not publish daemon base URL as OAuth URL", () => {
   const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
 
@@ -909,4 +941,14 @@ test("CodeBuddy OAuth launch URL is registered as a public gateway route", () =>
     source,
     /routePath\s*===\s*"\/direct-admin\/codebuddy\/oauth\/launch"[\s\S]{0,240}handleCodeBuddyOAuthLaunch\(req,\s*res,\s*url\)/,
   );
+});
+
+test("CodeBuddy OAuth uses a callback-confirmed remote UI flow", () => {
+  const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
+
+  assert.match(source, /routePath\s*===\s*"\/direct-admin\/codebuddy\/oauth\/callback"/);
+  assert.match(source, /routePath\s*===\s*"\/codebuddy"/);
+  assert.match(source, /routePath\.startsWith\("\/api\/v1\/"\)/);
+  assert.match(source, /handleCodeBuddyRemoteProxy\(req,\s*res,\s*url\)/);
+  assert.match(source, /codeBuddyOAuthSession\.confirmedAt/);
 });
