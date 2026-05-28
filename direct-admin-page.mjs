@@ -339,8 +339,8 @@ export function buildDirectAdminHtml() {
             </div>
           </div>
           <div class="field" style="margin-top: 12px;">
-            <label for="cbOauthUrl">授权入口 / CodeBuddy Base URL</label>
-            <textarea id="cbOauthUrl" readonly placeholder="点击生成后显示"></textarea>
+            <label for="cbOauthUrl">授权链接（由 CodeBuddy 返回）</label>
+            <textarea id="cbOauthUrl" readonly placeholder="未生成授权链接；如果服务器已登录，可直接检查授权并导入账号"></textarea>
           </div>
           <div class="field">
             <label for="cbOauthCallback">回调 URL / 授权完成结果（可选）</label>
@@ -690,12 +690,28 @@ export function buildDirectAdminHtml() {
     function codeBuddyAccountLabel(account) {
       return account?.label || account?.userName || account?.userNickname || account?.id || '未命名账号';
     }
+    function normalizeCodeBuddyOAuthUrl(value) {
+      const text = String(value || '').trim();
+      if (/^\\/direct-admin\\/codebuddy\\/oauth\\/launch(?:\\?|$)/.test(text)) return text;
+      if (!/^https?:\\/\\//i.test(text)) return '';
+      try {
+        const parsed = new URL(text);
+        if (parsed.pathname === '/direct-admin/codebuddy/oauth/launch') {
+          return parsed.pathname + parsed.search;
+        }
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'localhost' || host === '0.0.0.0' || host === '::1' || host.startsWith('127.')) return '';
+      } catch (_e) {
+        return '';
+      }
+      return text;
+    }
     function renderCodeBuddyOAuth() {
       const payload = state.codebuddy.oauthPayload || {};
       const session = payload.session || {};
       const accounts = payload.accounts || state.codebuddy.accounts || {};
       const authStatus = session.authStatus || (state.codebuddy.status && state.codebuddy.status.authStatus) || {};
-      const url = session.url || state.codebuddy.oauthUrl || state.codebuddy.status?.baseUrl || '';
+      const url = normalizeCodeBuddyOAuthUrl(session.url || state.codebuddy.oauthUrl || '');
       state.codebuddy.oauthUrl = url;
       const urlBox = $('cbOauthUrl');
       if (urlBox) urlBox.value = url;
@@ -710,7 +726,7 @@ export function buildDirectAdminHtml() {
           '回调: ' + (session.callbackUrl || '-'),
           '错误: ' + (session.error || '-'),
           '账号: ' + ((accounts && typeof accounts === 'object') ? String(accounts.count || 0) : '0'),
-        ].join('\n');
+        ].join('\\n');
       }
     }
     function renderCodeBuddySummary() {
@@ -907,7 +923,7 @@ export function buildDirectAdminHtml() {
         if (oauthRes && !oauthRes.__error) {
           state.codebuddy.oauthPayload = oauthRes;
           if (oauthRes.accounts) state.codebuddy.accounts = oauthRes.accounts;
-          if (oauthRes.session && oauthRes.session.url) state.codebuddy.oauthUrl = oauthRes.session.url;
+          state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(oauthRes.session && oauthRes.session.url);
         }
         await loadCodeBuddyModels();
         renderCodeBuddy();
@@ -918,12 +934,11 @@ export function buildDirectAdminHtml() {
     function applyCodeBuddyOAuthResult(result) {
       const payload = result && typeof result === 'object' ? result : {};
       state.codebuddy.oauthPayload = payload;
-      if (payload.session && payload.session.url) state.codebuddy.oauthUrl = payload.session.url;
+      state.codebuddy.oauthUrl = normalizeCodeBuddyOAuthUrl(payload.session && payload.session.url);
       if (payload.accounts) state.codebuddy.accounts = payload.accounts;
       if (payload.session && payload.session.authStatus) {
         state.codebuddy.status = Object.assign({}, state.codebuddy.status || {}, {
           authStatus: payload.session.authStatus,
-          baseUrl: payload.session.url || (state.codebuddy.status && state.codebuddy.status.baseUrl) || '',
         });
       }
       renderCodeBuddy();

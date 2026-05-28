@@ -109,6 +109,14 @@ test("direct admin topbar exists with sticky positioning in CSS", () => {
   assert.match(html, /position:\s*sticky/);
 });
 
+test("direct admin emits browser-parseable inline script", () => {
+  const html = buildDirectAdminHtml();
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1] || "";
+
+  assert.ok(script);
+  assert.doesNotThrow(() => new Function(script));
+});
+
 test("direct admin renders metric-grid with metric cards", () => {
   const html = buildDirectAdminHtml();
 
@@ -228,6 +236,29 @@ test("direct admin wires CodeBuddy state and refresh logic", () => {
   // setActiveView hooks the codebuddy refresh, but normal Cursor refresh stays scoped
   assert.match(html, /refreshCodeBuddy\(true\)/);
   assert.doesNotMatch(html, /renderAll\(\);\s*try\s*\{\s*await refreshCodeBuddy\(true\);/);
+});
+
+test("direct admin does not show CodeBuddy daemon base URL as OAuth link", () => {
+  const html = buildDirectAdminHtml();
+
+  assert.match(html, /function renderCodeBuddyOAuth/);
+  assert.doesNotMatch(html, /state\.codebuddy\.status\?\.baseUrl/);
+  assert.doesNotMatch(html, /baseUrl:\s*payload\.session\.url/);
+});
+
+test("direct admin accepts gateway CodeBuddy OAuth launch links", () => {
+  const html = buildDirectAdminHtml();
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1] || "";
+  const source = script.match(/function normalizeCodeBuddyOAuthUrl\([^]*?^    \}/m)?.[0] || "";
+  assert.ok(source);
+
+  const normalize = new Function(`${source}; return normalizeCodeBuddyOAuthUrl;`)();
+
+  assert.equal(
+    normalize("/direct-admin/codebuddy/oauth/launch?id=session&token=secret"),
+    "/direct-admin/codebuddy/oauth/launch?id=session&token=secret",
+  );
+  assert.equal(normalize("http://127.0.0.1:8080"), "");
 });
 
 test("direct admin handles missing CodeBuddy backend routes gracefully", () => {

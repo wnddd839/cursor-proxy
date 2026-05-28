@@ -36,6 +36,7 @@ import {
   runDirectCompletionWithRetry,
   selectDirectAccount,
   setMetadataCache,
+  summarizeCodeBuddyLoginResponse,
   summarizeCursorAuth,
   summarizeDirectAccount,
   writeCursorClientResponses,
@@ -873,4 +874,39 @@ test("deployment examples expose direct gateway streaming cache and parse knobs"
     assert.match(envExample, new RegExp(`${key}=`));
     assert.match(installer, new RegExp(key));
   }
+});
+
+test("CodeBuddy OAuth login response ignores daemon base URLs", () => {
+  assert.equal(
+    summarizeCodeBuddyLoginResponse({
+      ok: true,
+      baseUrl: "http://127.0.0.1:8080",
+      data: { status: "waiting" },
+    }).url,
+    "",
+  );
+
+  assert.equal(
+    summarizeCodeBuddyLoginResponse({
+      ok: true,
+      data: { authUrl: "https://codebuddy.example.com/oauth/login?state=abc" },
+    }).url,
+    "https://codebuddy.example.com/oauth/login?state=abc",
+  );
+});
+
+test("CodeBuddy OAuth session does not publish daemon base URL as OAuth URL", () => {
+  const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /url:\s*codeBuddyOAuthSession\.url\s*\|\|\s*normalizeCodeBuddyBaseUrl/);
+  assert.doesNotMatch(source, /codeBuddyOAuthSession\.url\s*=\s*normalizeCodeBuddyBaseUrl/);
+});
+
+test("CodeBuddy OAuth launch URL is registered as a public gateway route", () => {
+  const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    source,
+    /routePath\s*===\s*"\/direct-admin\/codebuddy\/oauth\/launch"[\s\S]{0,240}handleCodeBuddyOAuthLaunch\(req,\s*res,\s*url\)/,
+  );
 });
