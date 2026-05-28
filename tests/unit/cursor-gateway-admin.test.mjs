@@ -185,14 +185,16 @@ test("direct admin renders the CodeBuddy management panel structure", () => {
   assert.match(html, /id="codebuddyAccountSummary"/);
   assert.match(html, /id="codebuddyAccountRows"/);
   assert.match(html, /id="codebuddyModelRows"/);
-  assert.match(html, /id="codebuddyImportTabs"/);
-  assert.match(html, /data-cb-tab="single"/);
-  assert.match(html, /data-cb-tab="batch"/);
-  assert.match(html, /id="cbImportAuthToken"/);
-  assert.match(html, /id="cbImportApiKey"/);
-  assert.match(html, /id="cbImportApiKeyHelper"/);
-  assert.match(html, /id="cbImportBaseUrl"/);
-  assert.match(html, /id="cbImportInternetEnv"/);
+  assert.match(html, /id="codebuddyOAuthPanel"/);
+  assert.match(html, /id="cbOauthStartBtn"/);
+  assert.match(html, /id="cbOauthCheckBtn"/);
+  assert.match(html, /id="cbOauthUrl"/);
+  assert.match(html, /id="cbOauthStatusBox"/);
+  assert.doesNotMatch(html, /id="codebuddyImportTabs"/);
+  assert.doesNotMatch(html, /id="cbImportAuthToken"/);
+  assert.doesNotMatch(html, /id="cbImportApiKey"/);
+  assert.doesNotMatch(html, /id="cbImportApiKeyHelper"/);
+  assert.doesNotMatch(html, /id="cbImportBatchJson"/);
   assert.match(html, /id="cbProbeBtn"/);
   assert.match(html, /id="cbProbeBox"/);
 });
@@ -204,19 +206,25 @@ test("direct admin wires CodeBuddy state and refresh logic", () => {
   assert.match(html, /codebuddy:\s*\{/);
   assert.match(html, /importMode:\s*'single'/);
   assert.match(html, /unsupported:\s*false/);
+  assert.match(html, /oauthPayload:\s*null/);
   // core helpers exist
   assert.match(html, /function refreshCodeBuddy/);
   assert.match(html, /function renderCodeBuddy\b/);
-  assert.match(html, /function importCodeBuddyAccounts/);
+  assert.match(html, /function renderCodeBuddyOAuth/);
+  assert.match(html, /function startCodeBuddyOAuth/);
+  assert.match(html, /function checkCodeBuddyOAuth/);
   assert.match(html, /function codeBuddyAccountAction/);
   assert.match(html, /function runCodeBuddyProbe/);
   assert.match(html, /function loadCodeBuddyModels/);
   // hits the documented backend routes
   assert.match(html, /\/codebuddy\/status/);
   assert.match(html, /\/codebuddy\/accounts/);
-  assert.match(html, /\/codebuddy\/accounts\/import/);
+  assert.match(html, /\/codebuddy\/oauth\/session/);
+  assert.match(html, /\/codebuddy\/oauth\/start/);
+  assert.match(html, /\/codebuddy\/oauth\/callback/);
   assert.match(html, /\/codebuddy\/models/);
   assert.match(html, /\/codebuddy\/probe/);
+  assert.doesNotMatch(html, /function buildCodeBuddyImportBody/);
   // setActiveView hooks the codebuddy refresh, but normal Cursor refresh stays scoped
   assert.match(html, /refreshCodeBuddy\(true\)/);
   assert.doesNotMatch(html, /renderAll\(\);\s*try\s*\{\s*await refreshCodeBuddy\(true\);/);

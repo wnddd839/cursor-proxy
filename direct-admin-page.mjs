@@ -293,9 +293,7 @@ export function buildDirectAdminHtml() {
                   <th>登录</th>
                   <th>状态</th>
                   <th>Base URL</th>
-                  <th>Auth Token</th>
-                  <th>API Key</th>
-                  <th>Helper</th>
+                  <th>来源</th>
                   <th>成功</th>
                   <th>失败</th>
                   <th>最后使用</th>
@@ -304,7 +302,7 @@ export function buildDirectAdminHtml() {
                 </tr>
               </thead>
               <tbody id="codebuddyAccountRows">
-                <tr><td colspan="13" class="muted">正在读取账号池...</td></tr>
+                <tr><td colspan="11" class="muted">正在读取账号池...</td></tr>
               </tbody>
             </table>
           </div>
@@ -325,61 +323,39 @@ export function buildDirectAdminHtml() {
           </div>
         </div>
 
-        <div class="subsection">
+        <div class="subsection" id="codebuddyOAuthPanel">
           <div class="subsection-head">
-            <span class="subsection-title">导入账号 <span class="tag">INGEST</span></span>
+            <span class="subsection-title">OAuth 登录 <span class="tag">OAUTH</span></span>
+            <span class="subsection-note">使用服务器上 CodeBuddy daemon 的 OAuth 登录态写入账号池</span>
           </div>
-          <div class="import-tabs" id="codebuddyImportTabs">
-            <button type="button" class="active" data-cb-tab="single">单个账号</button>
-            <button type="button" data-cb-tab="batch">批量 JSON</button>
-          </div>
-          <div id="codebuddyImportSingle" class="import-pane">
-            <div class="split">
-              <div class="field">
-                <label for="cbImportLabel">备注 label</label>
-                <input id="cbImportLabel" placeholder="例如：CodeBuddy 主账号" />
-              </div>
-              <div class="field">
-                <label for="cbImportBaseUrl">Base URL（可选）</label>
-                <input id="cbImportBaseUrl" placeholder="http://127.0.0.1:8080" />
-              </div>
-            </div>
-            <div class="split">
-              <div class="field">
-                <label for="cbImportAuthToken">Auth Token</label>
-                <input id="cbImportAuthToken" type="password" autocomplete="off" placeholder="authToken" />
-              </div>
-              <div class="field">
-                <label for="cbImportApiKey">API Key</label>
-                <input id="cbImportApiKey" type="password" autocomplete="off" placeholder="apiKey" />
-              </div>
-            </div>
-            <div class="split">
-              <div class="field">
-                <label for="cbImportApiKeyHelper">API Key Helper（命令）</label>
-                <input id="cbImportApiKeyHelper" autocomplete="off" placeholder="可选 helper 命令" />
-              </div>
-              <div class="field">
-                <label for="cbImportInternetEnv">Internet Environment</label>
-                <input id="cbImportInternetEnv" placeholder="default / corp" />
-              </div>
-            </div>
-            <div class="row" style="margin-top: 12px;">
-              <button class="primary" id="cbImportBtn">导入 CodeBuddy 账号</button>
-            </div>
-            <div class="toast-line" id="cbImportToast"></div>
-          </div>
-          <div id="codebuddyImportBatch" class="import-pane hidden">
+          <div class="split">
             <div class="field">
-              <label for="cbImportBatchJson">批量 JSON</label>
-              <textarea id="cbImportBatchJson" placeholder='{"accounts":[{"label":"A","authToken":"...","apiKey":"...","baseUrl":"..."}]}'></textarea>
+              <label for="cbOauthLabel">账号备注</label>
+              <input id="cbOauthLabel" placeholder="CodeBuddy OAuth" />
             </div>
-            <div class="import-hint">支持 <code>{"accounts":[...]}</code> 或直接粘贴 JSON 数组。每条至少包含 <code>authToken</code> / <code>apiKey</code> / <code>apiKeyHelper</code> 之一。</div>
-            <div class="row">
-              <button class="primary" id="cbImportBatchBtn">批量导入</button>
+            <div class="field">
+              <label>OAuth 会话状态</label>
+              <div class="oauth-box" id="cbOauthStatusBox">尚未读取 CodeBuddy OAuth 状态。</div>
             </div>
-            <div class="toast-line" id="cbImportBatchToast"></div>
           </div>
+          <div class="field" style="margin-top: 12px;">
+            <label for="cbOauthUrl">授权入口 / CodeBuddy Base URL</label>
+            <textarea id="cbOauthUrl" readonly placeholder="点击生成后显示"></textarea>
+          </div>
+          <div class="field">
+            <label for="cbOauthCallback">回调 URL / 授权完成结果（可选）</label>
+            <input id="cbOauthCallback" placeholder="如 CodeBuddy 返回最终跳转地址，可粘贴后检查；也可以留空直接检查服务器登录态" />
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button class="primary" id="cbOauthStartBtn">生成 CodeBuddy OAuth 登录态</button>
+            <button id="cbOauthOpenBtn" type="button" disabled>打开链接</button>
+            <button id="cbOauthCopyBtn" type="button" disabled>复制链接</button>
+            <button id="cbOauthCheckBtn" type="button">检查授权并导入账号</button>
+          </div>
+          <div class="import-hint">
+            不再要求手工填写 authToken / API Key / apiKeyHelper；确认 OAuth 登录态后写入 <code>daemon</code> 类型账号。
+          </div>
+          <div class="toast-line" id="cbOauthToast"></div>
         </div>
 
         <div class="subsection">
@@ -431,8 +407,10 @@ export function buildDirectAdminHtml() {
         status: null,
         accounts: null,
         models: [],
-        importMode: 'single',
         unsupported: false,
+        oauthPayload: null,
+        oauthUrl: '',
+        oauthLabel: 'CodeBuddy OAuth',
       },
     };
     const $ = (id) => document.getElementById(id);
@@ -474,10 +452,10 @@ export function buildDirectAdminHtml() {
       $('accountPoolLoading').classList.toggle('hidden', !flag);
       const cbRefresh = $('codebuddyRefreshBtn');
       if (cbRefresh) cbRefresh.disabled = flag;
-      const cbImportBtn = $('cbImportBtn');
-      if (cbImportBtn) cbImportBtn.disabled = flag;
-      const cbImportBatchBtn = $('cbImportBatchBtn');
-      if (cbImportBatchBtn) cbImportBatchBtn.disabled = flag;
+      const cbOauthStartBtn = $('cbOauthStartBtn');
+      if (cbOauthStartBtn) cbOauthStartBtn.disabled = flag;
+      const cbOauthCheckBtn = $('cbOauthCheckBtn');
+      if (cbOauthCheckBtn) cbOauthCheckBtn.disabled = flag;
       const cbProbeBtn = $('cbProbeBtn');
       if (cbProbeBtn) cbProbeBtn.disabled = flag;
       const cbLoading = $('codebuddyLoading');
@@ -695,6 +673,7 @@ export function buildDirectAdminHtml() {
         case 'api_key': return 'API Key';
         case 'auth_token': return 'Auth Token';
         case 'api_key_helper': return 'Helper';
+        case 'daemon': return 'Daemon OAuth';
         default: return type || '-';
       }
     }
@@ -711,16 +690,28 @@ export function buildDirectAdminHtml() {
     function codeBuddyAccountLabel(account) {
       return account?.label || account?.userName || account?.userNickname || account?.id || '未命名账号';
     }
-    function setCodeBuddyImportMode(mode) {
-      state.codebuddy.importMode = mode;
-      const tabs = $('codebuddyImportTabs');
-      if (tabs) {
-        tabs.querySelectorAll('button[data-cb-tab]').forEach((btn) => {
-          btn.classList.toggle('active', btn.getAttribute('data-cb-tab') === mode);
-        });
+    function renderCodeBuddyOAuth() {
+      const payload = state.codebuddy.oauthPayload || {};
+      const session = payload.session || {};
+      const accounts = payload.accounts || state.codebuddy.accounts || {};
+      const authStatus = session.authStatus || (state.codebuddy.status && state.codebuddy.status.authStatus) || {};
+      const url = session.url || state.codebuddy.oauthUrl || state.codebuddy.status?.baseUrl || '';
+      state.codebuddy.oauthUrl = url;
+      const urlBox = $('cbOauthUrl');
+      if (urlBox) urlBox.value = url;
+      $('cbOauthOpenBtn').disabled = !url;
+      $('cbOauthCopyBtn').disabled = !url;
+      const statusBox = $('cbOauthStatusBox');
+      if (statusBox) {
+        statusBox.textContent = [
+          '会话: ' + (session.status || 'idle'),
+          '认证: ' + ((session.authenticated || authStatus.authenticated) ? '已完成' : '未完成'),
+          '登录态: ' + (authStatus.authEnabled === false ? '无需密码' : (authStatus.authEnabled ? '需要密码' : '未知')),
+          '回调: ' + (session.callbackUrl || '-'),
+          '错误: ' + (session.error || '-'),
+          '账号: ' + ((accounts && typeof accounts === 'object') ? String(accounts.count || 0) : '0'),
+        ].join('\n');
       }
-      $('codebuddyImportSingle').classList.toggle('hidden', mode !== 'single');
-      $('codebuddyImportBatch').classList.toggle('hidden', mode !== 'batch');
     }
     function renderCodeBuddySummary() {
       const status = state.codebuddy.status || {};
@@ -740,7 +731,9 @@ export function buildDirectAdminHtml() {
       configPill.className = 'pill ' + (unsupported ? 'warn' : (configured ? 'good' : 'muted'));
 
       const authPill = $('codebuddyAuthPill');
-      const loggedIn = pool && typeof pool.loggedIn === 'boolean' ? pool.loggedIn : null;
+      const loggedIn = pool && typeof pool.loggedIn === 'boolean'
+        ? pool.loggedIn
+        : (status.authStatus && typeof status.authStatus.authenticated === 'boolean' ? status.authStatus.authenticated : null);
       if (unsupported) {
         authPill.textContent = '接口未启用';
         authPill.className = 'pill muted';
@@ -777,21 +770,19 @@ export function buildDirectAdminHtml() {
       const tbody = $('codebuddyAccountRows');
       if (!tbody) return;
       if (state.codebuddy.unsupported) {
-        tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">// CodeBuddy 后端管理接口尚未启用。当前仅保留前端视图入口。</div></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">// CodeBuddy 后端管理接口尚未启用。当前仅保留前端视图入口。</div></td></tr>';
         renderCodeBuddyProbeAccounts([]);
         return;
       }
       if (!accounts.length) {
-        tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">// 账号池为空。请使用下方「导入账号」面板添加。</div></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="11"><div class="empty-state">// 账号池为空。请使用下方 OAuth 面板添加。</div></td></tr>';
       } else {
         tbody.innerHTML = accounts.map((account) => {
           const id = escapeHtml(account.id || '');
           const label = escapeHtml(account.label || '-');
           const authType = escapeHtml(codeBuddyAuthTypeLabel(account.authType));
           const baseUrl = escapeHtml(account.baseUrl || '-');
-          const tokenPreview = escapeHtml(account.authTokenPreview || '-');
-          const apiKeyPreview = escapeHtml(account.apiKeyPreview || '-');
-          const helperPreview = escapeHtml(account.apiKeyHelperPreview || '-');
+          const source = escapeHtml(account.source || '-');
           const lastErr = escapeHtml(truncateText(account.lastError || '-', 32));
           const enabled = account.enabled !== false;
           const actions = [
@@ -807,9 +798,7 @@ export function buildDirectAdminHtml() {
             '<td>' + codeBuddyLoggedInPill(account.loggedIn) + '</td>' +
             '<td>' + renderStatusBadge(enabled) + '</td>' +
             '<td class="cell-mono" title="' + baseUrl + '">' + baseUrl + '</td>' +
-            '<td class="cell-mono" title="' + tokenPreview + '">' + tokenPreview + '</td>' +
-            '<td class="cell-mono" title="' + apiKeyPreview + '">' + apiKeyPreview + '</td>' +
-            '<td class="cell-mono" title="' + helperPreview + '">' + helperPreview + '</td>' +
+            '<td>' + source + '</td>' +
             '<td>' + escapeHtml(String(account.successRequests || 0)) + '</td>' +
             '<td>' + escapeHtml(String(account.failedRequests || 0)) + '</td>' +
             '<td>' + escapeHtml(fmtTime(account.lastUsedAt)) + '</td>' +
@@ -873,6 +862,7 @@ export function buildDirectAdminHtml() {
     }
     function renderCodeBuddy() {
       renderCodeBuddySummary();
+      renderCodeBuddyOAuth();
       renderCodeBuddyAccounts();
       renderCodeBuddyModels();
     }
@@ -902,6 +892,7 @@ export function buildDirectAdminHtml() {
           state.codebuddy.status = { provider: 'codebuddy', unsupported: true };
           state.codebuddy.accounts = { count: 0, enabledCount: 0, disabledCount: 0, accounts: [] };
           state.codebuddy.models = [];
+          state.codebuddy.oauthPayload = null;
           renderCodeBuddy();
           if (!silent) showToast('CodeBuddy 后端管理接口未启用', 'info');
           return;
@@ -912,67 +903,81 @@ export function buildDirectAdminHtml() {
         const accountsRes = await api('/codebuddy/accounts').catch((error) => ({ __error: error }));
         if (accountsRes && accountsRes.__error) throw accountsRes.__error;
         state.codebuddy.accounts = accountsRes;
+        const oauthRes = await api('/codebuddy/oauth/session').catch((error) => ({ __error: error }));
+        if (oauthRes && !oauthRes.__error) {
+          state.codebuddy.oauthPayload = oauthRes;
+          if (oauthRes.accounts) state.codebuddy.accounts = oauthRes.accounts;
+          if (oauthRes.session && oauthRes.session.url) state.codebuddy.oauthUrl = oauthRes.session.url;
+        }
         await loadCodeBuddyModels();
         renderCodeBuddy();
       } catch (error) {
         if (!silent) showToast('CodeBuddy 加载失败：' + error.message, 'error');
       }
     }
-    function buildCodeBuddyImportBody(mode) {
-      if (mode === 'batch') {
-        const raw = ($('cbImportBatchJson').value || '').trim();
-        if (!raw) throw new Error('请粘贴批量 JSON');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return { accounts: parsed };
-        if (parsed && Array.isArray(parsed.accounts)) return { accounts: parsed.accounts };
-        if (parsed && (parsed.authToken || parsed.apiKey || parsed.apiKeyHelper)) return { accounts: [parsed] };
-        throw new Error('批量 JSON 格式无效，需包含 accounts 数组或单个凭证对象');
+    function applyCodeBuddyOAuthResult(result) {
+      const payload = result && typeof result === 'object' ? result : {};
+      state.codebuddy.oauthPayload = payload;
+      if (payload.session && payload.session.url) state.codebuddy.oauthUrl = payload.session.url;
+      if (payload.accounts) state.codebuddy.accounts = payload.accounts;
+      if (payload.session && payload.session.authStatus) {
+        state.codebuddy.status = Object.assign({}, state.codebuddy.status || {}, {
+          authStatus: payload.session.authStatus,
+          baseUrl: payload.session.url || (state.codebuddy.status && state.codebuddy.status.baseUrl) || '',
+        });
       }
-      const label = ($('cbImportLabel').value || '').trim();
-      const authToken = ($('cbImportAuthToken').value || '').trim();
-      const apiKey = ($('cbImportApiKey').value || '').trim();
-      const apiKeyHelper = ($('cbImportApiKeyHelper').value || '').trim();
-      const baseUrl = ($('cbImportBaseUrl').value || '').trim();
-      const internetEnvironment = ($('cbImportInternetEnv').value || '').trim();
-      if (!authToken && !apiKey && !apiKeyHelper) {
-        throw new Error('authToken / apiKey / apiKeyHelper 至少填写一项');
-      }
-      const account = { label: label || undefined };
-      if (authToken) account.authToken = authToken;
-      if (apiKey) account.apiKey = apiKey;
-      if (apiKeyHelper) account.apiKeyHelper = apiKeyHelper;
-      if (baseUrl) account.baseUrl = baseUrl;
-      if (internetEnvironment) account.internetEnvironment = internetEnvironment;
-      return { accounts: [account] };
+      renderCodeBuddy();
     }
-    async function importCodeBuddyAccounts(mode) {
-      const toastId = mode === 'batch' ? 'cbImportBatchToast' : 'cbImportToast';
-      const btnId = mode === 'batch' ? 'cbImportBatchBtn' : 'cbImportBtn';
-      setInlineToast(toastId, '// 正在导入账号...');
-      $(btnId).disabled = true;
+    async function startCodeBuddyOAuth() {
+      setInlineToast('cbOauthToast', '// 正在生成 CodeBuddy OAuth 登录态...');
+      $('cbOauthStartBtn').disabled = true;
       try {
-        const body = buildCodeBuddyImportBody(mode);
-        const result = await api('/codebuddy/accounts/import', {
+        const label = ($('cbOauthLabel').value || '').trim() || 'CodeBuddy OAuth';
+        state.codebuddy.oauthLabel = label;
+        const result = await api('/codebuddy/oauth/start', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({ label }),
         });
-        if (mode === 'batch') {
-          $('cbImportBatchJson').value = '';
-        } else {
-          ['cbImportLabel', 'cbImportAuthToken', 'cbImportApiKey', 'cbImportApiKeyHelper', 'cbImportBaseUrl', 'cbImportInternetEnv']
-            .forEach((id) => { const node = $(id); if (node) node.value = ''; });
-        }
-        const count = Array.isArray(result.imported) ? result.imported.length : 0;
-        setInlineToast(toastId, '✓ 导入成功，共 ' + count + ' 个账号。');
-        showToast('CodeBuddy 账号导入成功 · ' + count + ' 个', 'success');
-        await refreshCodeBuddy(true);
+        applyCodeBuddyOAuthResult(result);
+        const session = result.session || {};
+        if (state.codebuddy.oauthUrl) await copyText(state.codebuddy.oauthUrl, 'CodeBuddy OAuth 链接');
+        setInlineToast('cbOauthToast', session.status === 'complete'
+          ? '✓ CodeBuddy 登录态已导入账号池。'
+          : '✓ 已触发 CodeBuddy OAuth 登录态，请在服务器上的 CodeBuddy 完成 /login 后点击检查。');
+        showToast('CodeBuddy OAuth 已启动', 'success');
       } catch (error) {
-        const message = error instanceof SyntaxError ? 'JSON 格式无效，请检查后重试' : error.message;
-        setInlineToast(toastId, '✗ 导入失败：' + message);
-        showToast('CodeBuddy 导入失败：' + message, 'error');
+        setInlineToast('cbOauthToast', '✗ 生成失败：' + error.message);
+        showToast('CodeBuddy OAuth 失败：' + error.message, 'error');
       } finally {
-        $(btnId).disabled = state.busy;
+        $('cbOauthStartBtn').disabled = state.busy;
+      }
+    }
+    async function checkCodeBuddyOAuth() {
+      setInlineToast('cbOauthToast', '// 正在检查 CodeBuddy OAuth 授权...');
+      $('cbOauthCheckBtn').disabled = true;
+      try {
+        const result = await api('/codebuddy/oauth/callback', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ callbackUrl: ($('cbOauthCallback').value || '').trim() }),
+        });
+        applyCodeBuddyOAuthResult(result);
+        const session = result.session || {};
+        if (result.ok) {
+          setInlineToast('cbOauthToast', '✓ CodeBuddy OAuth 已完成并导入账号池。');
+          showToast('CodeBuddy OAuth 账号已导入', 'success');
+        } else {
+          setInlineToast('cbOauthToast', '尚未完成授权，请在服务器上的 CodeBuddy 终端完成 /login 后重试。');
+        }
+        if (session.error && !result.ok) {
+          setInlineToast('cbOauthToast', '✗ 检查失败：' + session.error);
+        }
+      } catch (error) {
+        setInlineToast('cbOauthToast', '✗ 检查失败：' + error.message);
+        showToast('CodeBuddy OAuth 检查失败：' + error.message, 'error');
+      } finally {
+        $('cbOauthCheckBtn').disabled = state.busy;
       }
     }
     async function codeBuddyAccountAction(accountId, action) {
@@ -1321,21 +1326,22 @@ export function buildDirectAdminHtml() {
         showToast('操作失败：' + error.message, 'error');
       });
     });
-    const cbImportTabs = $('codebuddyImportTabs');
-    if (cbImportTabs) {
-      cbImportTabs.addEventListener('click', (event) => {
-        const btn = event.target.closest('button[data-cb-tab]');
-        if (btn) setCodeBuddyImportMode(btn.getAttribute('data-cb-tab'));
-      });
-    }
     const cbRefreshBtn = $('codebuddyRefreshBtn');
     if (cbRefreshBtn) cbRefreshBtn.addEventListener('click', () => refreshCodeBuddy(false).then(() => showToast('CodeBuddy 已刷新', 'success')).catch((error) => showToast('刷新失败：' + error.message, 'error')));
-    const cbImportBtn = $('cbImportBtn');
-    if (cbImportBtn) cbImportBtn.addEventListener('click', () => importCodeBuddyAccounts('single'));
-    const cbImportBatchBtn = $('cbImportBatchBtn');
-    if (cbImportBatchBtn) cbImportBatchBtn.addEventListener('click', () => importCodeBuddyAccounts('batch'));
+    const cbOauthStartBtn = $('cbOauthStartBtn');
+    if (cbOauthStartBtn) cbOauthStartBtn.addEventListener('click', startCodeBuddyOAuth);
+    const cbOauthOpenBtn = $('cbOauthOpenBtn');
+    if (cbOauthOpenBtn) cbOauthOpenBtn.addEventListener('click', () => {
+      if (state.codebuddy.oauthUrl) window.open(state.codebuddy.oauthUrl, '_blank', 'noopener,noreferrer');
+    });
+    const cbOauthCopyBtn = $('cbOauthCopyBtn');
+    if (cbOauthCopyBtn) cbOauthCopyBtn.addEventListener('click', (e) => copyText(state.codebuddy.oauthUrl, 'CodeBuddy OAuth 链接', e.currentTarget));
+    const cbOauthCheckBtn = $('cbOauthCheckBtn');
+    if (cbOauthCheckBtn) cbOauthCheckBtn.addEventListener('click', checkCodeBuddyOAuth);
     const cbProbeBtn = $('cbProbeBtn');
     if (cbProbeBtn) cbProbeBtn.addEventListener('click', runCodeBuddyProbe);
+    const cbOauthLabel = $('cbOauthLabel');
+    if (cbOauthLabel && !cbOauthLabel.value) cbOauthLabel.value = state.codebuddy.oauthLabel || 'CodeBuddy OAuth';
     const cbAccountRows = $('codebuddyAccountRows');
     if (cbAccountRows) {
       cbAccountRows.addEventListener('click', (event) => {

@@ -9,6 +9,29 @@ import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 import { buildDirectAdminHtml } from "./direct-admin-page.mjs";
+import {
+  createClaudeMessageFromProviderTurn,
+  createClaudeMessageStreamEventsFromProviderTurn,
+  createOpenAIChatCompletionFromProviderTurn,
+  createOpenAIChatCompletionStreamChunk,
+} from "./provider-events.mjs";
+import {
+  createCodeBuddyHeaders,
+  normalizeBaseUrl as normalizeCodeBuddyBaseUrl,
+  normalizeCodeBuddyModels,
+  runCodeBuddyCompletion,
+} from "./codebuddy-provider.mjs";
+import {
+  getCodeBuddyAccountsPath,
+  importCodeBuddyAccounts,
+  markCodeBuddyAccountResult,
+  readCodeBuddyAccountsStore,
+  resolveCodeBuddyAccountHeaders,
+  selectCodeBuddyAccount,
+  summarizeCodeBuddyAccount,
+  summarizeCodeBuddyAccountsStore,
+  writeCodeBuddyAccountsStore,
+} from "./codebuddy-account-pool.mjs";
 
 const DEFAULT_AUTH_PATH = path.join(homedir(), ".config", "cursor", "auth.json");
 const DEFAULT_DIRECT_PARSE_LIMITS = {
@@ -39,6 +62,15 @@ const config = {
   accountsPath:
     process.env.CURSOR_DIRECT_ACCOUNTS_PATH ||
     path.join(path.dirname(process.env.CURSOR_DIRECT_AUTH_PATH || DEFAULT_AUTH_PATH), "direct-accounts.json"),
+  codeBuddyAccountsPath:
+    process.env.CODEBUDDY_PROXY_ACCOUNTS_PATH ||
+    process.env.CURSOR_DIRECT_CODEBUDDY_ACCOUNTS_PATH ||
+    getCodeBuddyAccountsPath(),
+  codeBuddyBaseUrl:
+    process.env.CURSOR_DIRECT_CODEBUDDY_BASE_URL ||
+    process.env.CODEBUDDY_BASE_URL ||
+    "http://127.0.0.1:8080",
+  codeBuddyModels: process.env.CURSOR_DIRECT_CODEBUDDY_MODELS || "codebuddy/default",
   apiBaseUrl: process.env.CURSOR_DIRECT_API_BASE_URL || "https://api2.cursor.sh",
   agentHost: process.env.CURSOR_DIRECT_AGENT_HOST || "agentn.api5.cursor.sh",
   clientVersion: process.env.CURSOR_DIRECT_CLIENT_VERSION || "cli-2026.05.24-dda726e",
@@ -176,6 +208,7 @@ function createDirectMetadataCaches() {
     models: createMetadataCacheEntry(),
     authSummary: createMetadataCacheEntry(),
     oauthSession: createMetadataCacheEntry(),
+    codeBuddyOAuthSession: createMetadataCacheEntry(),
   };
 }
 
@@ -207,6 +240,7 @@ function invalidateDirectMetadataCaches(caches = metadataCaches) {
   clearMetadataCache(caches.models);
   clearMetadataCache(caches.authSummary);
   clearMetadataCache(caches.oauthSession);
+  clearMetadataCache(caches.codeBuddyOAuthSession);
 }
 
 function log(level, message, meta = undefined) {
@@ -274,6 +308,73 @@ function normalizeAnthropicModelAlias(model) {
 
 function displayModelId(model) {
   return model === "default" ? "auto" : model;
+}
+
+function resolveGatewayProviderModel(model) {
+  const cleaned = sanitizeModelName(model);
+  const codeBuddyMatch = cleaned.match(/^codebuddy(?:(?:\/|:)(.*))?$/i);
+  if (codeBuddyMatch) {
+    const upstreamModel = String(codeBuddyMatch[1] || "default").trim() || "default";
+    return {
+      provider: "codebuddy",
+      model: upstreamModel,
+      publicModel: `codebuddy/${upstreamModel}`,
+    };
+  }
+
+  return {
+    provider: "cursor",
+    model: normalizeDirectModel(cleaned),
+    publicModel: normalizePublicModelName(cleaned),
+  };
+}
+
+function normalizeCodeBuddyPublicModelId(model) {
+  const cleaned = sanitizeModelName(model);
+  if (/^codebuddy(?:\/|:|$)/i.test(cleaned)) {
+    return resolveGatewayProviderModel(cleaned).publicModel;
+  }
+  return `codebuddy/${cleaned || "default"}`;
+}
+
+function listConfiguredCodeBuddyModels() {
+  const raw = String(config.codeBuddyModels || "codebuddy/default").trim();
+  let rows = [];
+  if (raw.startsWith("[") || raw.startsWith("{")) {
+    try {
+      rows = normalizeCodeBuddyModels(JSON.parse(raw));
+    } catch {
+      rows = [];
+    }
+  }
+  if (rows.length === 0) {
+    rows = raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .map((id) => ({
+        id: normalizeCodeBuddyPublicModelId(id),
+        object: "model",
+        name: normalizeCodeBuddyPublicModelId(id),
+        owned_by: "codebuddy",
+        supportsTools: true,
+        supportsImages: false,
+      }));
+  } else {
+    rows = rows.map((model) => ({
+      ...model,
+      id: normalizeCodeBuddyPublicModelId(model.id),
+      name: model.name || normalizeCodeBuddyPublicModelId(model.id),
+    }));
+  }
+  return rows.length > 0 ? rows : [{
+    id: "codebuddy/default",
+    object: "model",
+    name: "codebuddy/default",
+    owned_by: "codebuddy",
+    supportsTools: true,
+    supportsImages: false,
+  }];
 }
 
 function base64UrlDecode(input) {
@@ -360,6 +461,24 @@ function createOAuthSessionState() {
 }
 
 let oauthSession = createOAuthSessionState();
+
+function createCodeBuddyOAuthSessionState() {
+  return {
+    id: "",
+    provider: "codebuddy",
+    status: "idle",
+    url: "",
+    callbackUrl: "",
+    startedAt: 0,
+    updatedAt: 0,
+    completedAt: 0,
+    error: "",
+    authStatus: null,
+    login: null,
+  };
+}
+
+let codeBuddyOAuthSession = createCodeBuddyOAuthSessionState();
 
 function normalizeDirectAccountAuth(input) {
   const source = typeof input === "object" && input ? input : {};
@@ -692,6 +811,309 @@ function markDirectAccountResult(selection, ok, details = {}) {
     failedRequests: Number(account.failedRequests || 0) + (ok ? 0 : 1),
     lastError: ok ? "" : String(details.error || "unknown error").slice(0, 600),
   }));
+}
+
+function readCodeBuddyStore() {
+  return readCodeBuddyAccountsStore({ accountsPath: config.codeBuddyAccountsPath });
+}
+
+function writeCodeBuddyStore(store) {
+  return writeCodeBuddyAccountsStore(store, { accountsPath: config.codeBuddyAccountsPath });
+}
+
+function summarizeCodeBuddyStore(store) {
+  return summarizeCodeBuddyAccountsStore(store, { accountsPath: config.codeBuddyAccountsPath });
+}
+
+function updateStoredCodeBuddyAccount(accountId, updater) {
+  const store = readCodeBuddyStore();
+  const index = store.accounts.findIndex((account) => account.id === accountId);
+  if (index < 0) return null;
+  const accounts = store.accounts.slice();
+  accounts[index] = updater(accounts[index]);
+  writeCodeBuddyStore({ ...store, accounts });
+  return accounts[index];
+}
+
+function selectCodeBuddyAccountFromPool(options = {}) {
+  const selected = selectCodeBuddyAccount(readCodeBuddyStore(), {
+    accountId: options.accountId,
+  });
+  if (selected.source === "pool") {
+    const store = writeCodeBuddyStore(selected.store);
+    return { ...selected, store };
+  }
+  return selected;
+}
+
+async function runCodeBuddyCompletionFromPool(messages = [], options = {}) {
+  const selection = selectCodeBuddyAccountFromPool({ accountId: options.accountId });
+  const headers = await resolveCodeBuddyAccountHeaders(selection.account);
+  let emittedOnAttempt = false;
+  try {
+    const result = await runCodeBuddyCompletion(messages, {
+      baseUrl: selection.account.baseUrl || config.codeBuddyBaseUrl,
+      headers,
+      model: options.model,
+      tools: options.tools,
+      toolChoice: options.toolChoice,
+      signal: options.signal,
+      fetchImpl: options.fetchImpl,
+      onEvent: options.onEvent,
+      onDelta: (delta) => {
+        emittedOnAttempt = emittedOnAttempt || Boolean(delta);
+        options.onDelta?.(delta);
+      },
+    });
+    markCodeBuddyAccountResult(selection, true, { accountsPath: config.codeBuddyAccountsPath });
+    return {
+      ...result,
+      account: summarizeCodeBuddyAccount(selection.account),
+      accountId: selection.account.id,
+      emittedOnAttempt,
+    };
+  } catch (error) {
+    markCodeBuddyAccountResult(selection, false, {
+      accountsPath: config.codeBuddyAccountsPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+function compactText(value) {
+  return String(value || "").trim();
+}
+
+function normalizeCodeBuddyLoginStatus(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const authenticated = Boolean(
+    source.authenticated === true ||
+    source.loggedIn === true ||
+    source.logged_in === true ||
+    source.success === true,
+  );
+  return {
+    authEnabled: typeof source.authEnabled === "boolean" ? source.authEnabled : Boolean(source.auth_enabled),
+    authenticated,
+    loggedIn: authenticated,
+    message: compactText(source.message || source.statusMessage || source.error || source.note || ""),
+    raw: {
+      authEnabled: typeof source.authEnabled === "boolean" ? source.authEnabled : Boolean(source.auth_enabled),
+      authenticated,
+    },
+  };
+}
+
+function findCodeBuddyLoginUrl(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+  if (typeof value.url === "string" && /^https?:\/\//i.test(value.url.trim())) return value.url.trim();
+  if (typeof value.loginUrl === "string" && /^https?:\/\//i.test(value.loginUrl.trim())) return value.loginUrl.trim();
+  if (typeof value.authUrl === "string" && /^https?:\/\//i.test(value.authUrl.trim())) return value.authUrl.trim();
+  if (typeof value.redirectUrl === "string" && /^https?:\/\//i.test(value.redirectUrl.trim())) return value.redirectUrl.trim();
+  for (const [key, entry] of Object.entries(value)) {
+    if (/token|secret|password|api[_-]?key/i.test(key)) continue;
+    if (typeof entry === "string" && /^https?:\/\//i.test(entry.trim())) return entry.trim();
+    if (entry && typeof entry === "object") {
+      const nested = findCodeBuddyLoginUrl(entry, seen);
+      if (nested) return nested;
+    }
+  }
+  return "";
+}
+
+function summarizeCodeBuddyLoginResponse(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    success: Boolean(source.success === true || source.ok === true || source.data?.success === true),
+    message: compactText(source.message || source.error || source.data?.message || source.data?.error || ""),
+    url: findCodeBuddyLoginUrl(source) || "",
+  };
+}
+
+function getCodeBuddyDaemonAccountId(baseUrl) {
+  return `daemon-${createHash("sha256").update(String(baseUrl || "")).digest("hex").slice(0, 16)}`;
+}
+
+function createCodeBuddyDaemonAccount(authStatus, options = {}) {
+  const baseUrl = normalizeCodeBuddyBaseUrl(options.baseUrl || config.codeBuddyBaseUrl);
+  return {
+    id: getCodeBuddyDaemonAccountId(baseUrl),
+    label: compactText(options.label || "CodeBuddy OAuth"),
+    source: "oauth",
+    baseUrl,
+    authType: "daemon",
+    useDaemonAuth: true,
+    enabled: true,
+    authStatus: normalizeCodeBuddyLoginStatus(authStatus),
+  };
+}
+
+async function fetchCodeBuddyAuthStatus() {
+  const response = await fetch(`${normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl)}/api/v1/auth/status`, {
+    headers: createCodeBuddyHeaders({ exemptRequestHeader: true }),
+  });
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    throw new Error(`CodeBuddy auth/status failed with ${response.status}`);
+  }
+  return normalizeCodeBuddyLoginStatus(data);
+}
+
+async function triggerCodeBuddyAuthLogin() {
+  const response = await fetch(`${normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl)}/api/v1/auth/login`, {
+    method: "POST",
+    headers: createCodeBuddyHeaders({ exemptRequestHeader: true }),
+    body: "{}",
+  });
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    throw new Error(`CodeBuddy auth/login failed with ${response.status}`);
+  }
+  return summarizeCodeBuddyLoginResponse(data);
+}
+
+function importCodeBuddyDaemonAccount(authStatus, options = {}) {
+  const account = createCodeBuddyDaemonAccount(authStatus, options);
+  const result = importCodeBuddyAccounts(readCodeBuddyStore(), { accounts: [account] });
+  const store = writeCodeBuddyStore(result.store);
+  return {
+    account: summarizeCodeBuddyAccount(result.imported[0] || account),
+    accounts: summarizeCodeBuddyStore(store),
+  };
+}
+
+async function getCodeBuddyOAuthSessionPayload(options = {}) {
+  const now = Date.now();
+  const cached = getMetadataCache(metadataCaches.codeBuddyOAuthSession, { now });
+  if (!options.fresh && cached) return cached;
+  const session = {
+    ...codeBuddyOAuthSession,
+    url: codeBuddyOAuthSession.url || normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+  };
+  let authStatus = null;
+  try {
+    authStatus = await fetchCodeBuddyAuthStatus();
+    session.authStatus = authStatus;
+    if (authStatus.authenticated) {
+      const imported = importCodeBuddyDaemonAccount(authStatus, {
+        label: codeBuddyOAuthSession.label || "CodeBuddy OAuth",
+      });
+      session.status = "complete";
+      session.completedAt = session.completedAt || Date.now();
+      session.error = "";
+      session.login = session.login || { success: true, message: "已检测到 CodeBuddy 登录态" };
+      codeBuddyOAuthSession = { ...codeBuddyOAuthSession, ...session };
+      const payload = {
+        ok: true,
+        provider: "codebuddy",
+        session: {
+          ...session,
+          running: false,
+          authenticated: true,
+        },
+        accounts: imported.accounts,
+        account: imported.account,
+      };
+      return setMetadataCache(metadataCaches.codeBuddyOAuthSession, payload, { now, ttlMs: config.oauthSessionCacheTtlMs });
+    }
+  } catch (error) {
+    session.error = error instanceof Error ? error.message : String(error);
+  }
+  const payload = {
+    ok: true,
+    provider: "codebuddy",
+    session: {
+      ...session,
+      running: false,
+      authenticated: Boolean(authStatus?.authenticated),
+    },
+    accounts: summarizeCodeBuddyStore(readCodeBuddyStore()),
+    account: summarizeCodeBuddyStore(readCodeBuddyStore()).primary,
+  };
+  return setMetadataCache(metadataCaches.codeBuddyOAuthSession, payload, { now, ttlMs: config.oauthSessionCacheTtlMs });
+}
+
+async function startCodeBuddyOAuthSession(options = {}) {
+  if (codeBuddyOAuthSession.status === "starting" || codeBuddyOAuthSession.status === "waiting") {
+    return getCodeBuddyOAuthSessionPayload({ fresh: true });
+  }
+  codeBuddyOAuthSession = createCodeBuddyOAuthSessionState();
+  codeBuddyOAuthSession.id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  codeBuddyOAuthSession.status = "starting";
+  codeBuddyOAuthSession.startedAt = Date.now();
+  codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.startedAt;
+  codeBuddyOAuthSession.url = normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl);
+  codeBuddyOAuthSession.label = compactText(options.label || "CodeBuddy OAuth");
+  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  const login = await triggerCodeBuddyAuthLogin();
+  codeBuddyOAuthSession.login = login;
+  codeBuddyOAuthSession.url = login.url || codeBuddyOAuthSession.url;
+  codeBuddyOAuthSession.status = login.success ? "waiting" : "failed";
+  codeBuddyOAuthSession.updatedAt = Date.now();
+  codeBuddyOAuthSession.error = login.message || "";
+  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  return getCodeBuddyOAuthSessionPayload({ fresh: true });
+}
+
+async function waitForCodeBuddyOAuthCompletion(callbackUrl = "") {
+  if (callbackUrl) {
+    codeBuddyOAuthSession.callbackUrl = String(callbackUrl).trim();
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  }
+  const authStatus = await fetchCodeBuddyAuthStatus();
+  codeBuddyOAuthSession.authStatus = authStatus;
+  if (authStatus.authenticated) {
+    const imported = importCodeBuddyDaemonAccount(authStatus, {
+      label: codeBuddyOAuthSession.label || "CodeBuddy OAuth",
+    });
+    codeBuddyOAuthSession.status = "complete";
+    codeBuddyOAuthSession.completedAt = Date.now();
+    codeBuddyOAuthSession.error = "";
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    return {
+      ok: true,
+      provider: "codebuddy",
+      session: {
+        ...codeBuddyOAuthSession,
+        running: false,
+        authenticated: true,
+      },
+      accounts: imported.accounts,
+      account: imported.account,
+    };
+  }
+  codeBuddyOAuthSession.status = "waiting";
+  codeBuddyOAuthSession.error = "尚未检测到 CodeBuddy 登录态，请在服务器上的 CodeBuddy 终端完成 /login 后重试";
+  codeBuddyOAuthSession.updatedAt = Date.now();
+  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+  return {
+    ok: false,
+    provider: "codebuddy",
+    session: {
+      ...codeBuddyOAuthSession,
+      running: false,
+      authenticated: false,
+    },
+    accounts,
+    account: accounts.primary,
+  };
 }
 
 function resolveCursorAgentBinary() {
@@ -2912,6 +3334,11 @@ function getStatusPayload() {
     authRequired: config.requireApiKey,
     authPath: config.authPath,
     accountsPath: config.accountsPath,
+    codeBuddy: {
+      accountsPath: config.codeBuddyAccountsPath,
+      baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      models: listConfiguredCodeBuddyModels().map((model) => model.id),
+    },
     agentHost: config.agentHost,
     clientVersion: config.clientVersion,
     uptimeMs: Date.now() - startedAt,
@@ -2937,12 +3364,20 @@ function buildDirectAdminStatusPayload(options = {}) {
     apiKeyPreview: maskSecret(apiKey, 6),
     publicBaseUrl,
     apiBaseUrl: config.apiBaseUrl,
+    codeBuddy: {
+      accountsPath: config.codeBuddyAccountsPath,
+      baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      models: listConfiguredCodeBuddyModels().map((model) => model.id),
+    },
     memory: getMemorySnapshot(),
     config: {
       host: config.host,
       port: config.port,
       authPath: config.authPath,
       accountsPath: config.accountsPath,
+      codeBuddyAccountsPath: config.codeBuddyAccountsPath,
+      codeBuddyBaseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      codeBuddyModels: config.codeBuddyModels,
       agentHost: config.agentHost,
       clientVersion: config.clientVersion,
       publicBaseUrl: config.publicBaseUrl,
@@ -3038,6 +3473,201 @@ async function handle(req, res) {
       }));
       res.writeHead(response.status, response.headers);
       res.end(response.body);
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/status" && req.method === "GET") {
+      try {
+        const authStatus = await fetchCodeBuddyAuthStatus().catch(() => null);
+        const response = json(200, {
+          ok: true,
+          provider: "codebuddy",
+          baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+          accounts: summarizeCodeBuddyStore(readCodeBuddyStore()),
+          models: listConfiguredCodeBuddyModels(),
+          authStatus,
+        });
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(502, "upstream_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/oauth/session" && req.method === "GET") {
+      try {
+        const response = json(200, await getCodeBuddyOAuthSessionPayload({ fresh: url.searchParams.get("fresh") === "1" }));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(500, "internal_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/oauth/start" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req).catch(() => ({}));
+        const response = json(200, await startCodeBuddyOAuthSession({ label: body?.label || "" }));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(500, "internal_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/oauth/callback" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req).catch(() => ({}));
+        const response = json(200, await waitForCodeBuddyOAuthCompletion(body?.callbackUrl || body?.url || ""));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(500, "internal_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/accounts" && req.method === "GET") {
+      try {
+        const response = json(200, summarizeCodeBuddyStore(readCodeBuddyStore()));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(500, "internal_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/accounts/import" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req);
+        const result = importCodeBuddyAccounts(readCodeBuddyStore(), body);
+        if (result.imported.length === 0) throw new Error("No CodeBuddy accounts found in request body");
+        const store = writeCodeBuddyStore(result.store);
+        const response = json(200, {
+          ok: true,
+          imported: result.summaries,
+          accounts: summarizeCodeBuddyStore(store),
+        });
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    const codeBuddyAccountRoute = routePath.match(/^\/direct-admin\/api\/codebuddy\/accounts\/([^/]+)(?:\/([^/]+))?$/);
+    if (codeBuddyAccountRoute) {
+      const accountId = decodeURIComponent(codeBuddyAccountRoute[1]);
+      const action = codeBuddyAccountRoute[2] || "";
+      try {
+        if (req.method === "DELETE" && !action) {
+          const store = readCodeBuddyStore();
+          const nextStore = writeCodeBuddyStore({
+            ...store,
+            accounts: store.accounts.filter((account) => account.id !== accountId),
+            nextIndex: 0,
+          });
+          const response = json(200, { ok: true, accounts: summarizeCodeBuddyStore(nextStore) });
+          res.writeHead(response.status, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        if (req.method === "POST" && (action === "enable" || action === "disable")) {
+          const updated = updateStoredCodeBuddyAccount(accountId, (account) => ({
+            ...account,
+            enabled: action === "enable",
+            updatedAt: Date.now(),
+          }));
+          if (!updated) throw new Error(`CodeBuddy account not found: ${accountId}`);
+          const response = json(200, {
+            ok: true,
+            account: summarizeCodeBuddyAccount(updated),
+            accounts: summarizeCodeBuddyStore(readCodeBuddyStore()),
+          });
+          res.writeHead(response.status, response.headers);
+          res.end(response.body);
+          return;
+        }
+
+        const response = openAiError(404, "not_found_error", `Unsupported CodeBuddy account action: ${action || req.method}`);
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/models" && req.method === "GET") {
+      const response = json(200, {
+        ok: true,
+        provider: "codebuddy",
+        models: listConfiguredCodeBuddyModels(),
+      });
+      res.writeHead(response.status, response.headers);
+      res.end(response.body);
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/probe" && req.method === "POST") {
+      let body = {};
+      try {
+        body = await readRequestBody(req);
+      } catch {
+        const response = openAiError(400, "invalid_request_error", "Invalid JSON body");
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+        return;
+      }
+
+      const providerModel = resolveGatewayProviderModel(body?.model || "codebuddy/default");
+      const prompt = String(body?.prompt || "Reply with EXACTLY CODEBUDDY_DIRECT_OK and no other text.");
+      const started = Date.now();
+      try {
+        const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
+          accountId: body?.accountId || "",
+          model: providerModel.model,
+        });
+        const response = json(200, {
+          ok: true,
+          provider: "codebuddy",
+          model: providerModel.publicModel,
+          durationMs: Date.now() - started,
+          text: result.turn.text,
+          toolUses: result.turn.toolUses.map((tool) => ({
+            id: tool.id,
+            name: tool.name,
+            inputKeys: tool.input && typeof tool.input === "object" ? Object.keys(tool.input) : [],
+          })),
+          account: result.account,
+        });
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(502, "upstream_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
       return;
     }
 
@@ -3321,15 +3951,31 @@ async function handle(req, res) {
   if ((routePath === "/v1/models" || routePath === "/models") && req.method === "GET") {
     try {
       const created = Math.floor(Date.now() / 1000);
-      const models = await listDirectModels();
+      let directModels = [];
+      try {
+        directModels = await listDirectModels();
+      } catch (error) {
+        log("warn", "direct model list unavailable while building proxy model list", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const codeBuddyModels = listConfiguredCodeBuddyModels();
       const response = json(200, {
         object: "list",
-        data: models.map((model) => ({
+        data: [
+          ...directModels.map((model) => ({
           id: model.id,
           object: "model",
           created,
           owned_by: "cursor-direct",
-        })),
+          })),
+          ...codeBuddyModels.map((model) => ({
+            id: model.id,
+            object: "model",
+            created,
+            owned_by: model.owned_by || "codebuddy",
+          })),
+        ],
       });
       res.writeHead(response.status, response.headers);
       res.end(response.body);
@@ -3387,6 +4033,208 @@ async function handle(req, res) {
 
     const messages = Array.isArray(body?.messages) ? body.messages : [];
     const rawRequestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "claude-sonnet-4-5";
+    const providerModel = resolveGatewayProviderModel(rawRequestedModel);
+    if (providerModel.provider === "codebuddy") {
+      const requestedModel = providerModel.publicModel;
+      const claudeToolOptions = { tools: body?.tools, toolChoice: body?.tool_choice };
+      const prompt = buildPromptFromClaudeMessages(messages, body?.system, claudeToolOptions);
+      const streamRequested = body?.stream === true;
+      const finishRequest = beginTrackedRequest(requestedModel, prompt.length, { stream: streamRequested });
+      log("info", "codebuddy claude messages request", {
+        model: providerModel.model,
+        requestedModel,
+        stream: streamRequested,
+        messages: messages.length,
+        promptChars: prompt.length,
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 120),
+      });
+
+      if (streamRequested) {
+        const id = `msg_codebuddy_${Date.now()}`;
+        const controller = new AbortController();
+        let responseStarted = false;
+        let responseDone = false;
+        let textBlockStarted = false;
+        let textBlockStopped = false;
+        let streamedChars = 0;
+        let nextBlockIndex = 0;
+
+        const writeClaudeEvent = (event, payload) => {
+          res.write(createClaudeStreamEvent(event, payload));
+        };
+        const startMessage = () => {
+          if (responseStarted || res.destroyed) return;
+          responseStarted = true;
+          res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+            "access-control-allow-origin": "*",
+          });
+          writeClaudeEvent("message_start", createClaudeMessageStreamEventsFromProviderTurn({ text: "", toolUses: [] }, {
+            id,
+            model: requestedModel,
+            prompt,
+          })[0].payload);
+          flushResponse(res);
+        };
+        const startTextBlock = () => {
+          startMessage();
+          if (textBlockStarted || res.destroyed) return;
+          textBlockStarted = true;
+          writeClaudeEvent("content_block_start", {
+            type: "content_block_start",
+            index: nextBlockIndex,
+            content_block: { type: "text", text: "" },
+          });
+          flushResponse(res);
+        };
+        const stopTextBlock = () => {
+          if (!textBlockStarted || textBlockStopped || res.destroyed) return;
+          textBlockStopped = true;
+          writeClaudeEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: nextBlockIndex,
+          });
+          nextBlockIndex += 1;
+        };
+        const writeToolUses = (toolUses) => {
+          for (const tool of toolUses) {
+            writeClaudeEvent("content_block_start", {
+              type: "content_block_start",
+              index: nextBlockIndex,
+              content_block: {
+                type: "tool_use",
+                id: tool.id,
+                name: tool.name || "tool",
+                input: {},
+              },
+            });
+            writeClaudeEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: nextBlockIndex,
+              delta: {
+                type: "input_json_delta",
+                partial_json: JSON.stringify(tool.input || {}),
+              },
+            });
+            writeClaudeEvent("content_block_stop", {
+              type: "content_block_stop",
+              index: nextBlockIndex,
+            });
+            nextBlockIndex += 1;
+          }
+        };
+
+        const keepAliveMs = Math.max(0, Number(config.streamKeepAliveMs || 0));
+        const keepAliveTimer = keepAliveMs > 0
+          ? setInterval(() => {
+            if (!responseDone && responseStarted && !res.destroyed) {
+              writeClaudeEvent("ping", { type: "ping" });
+              flushResponse(res);
+            }
+          }, keepAliveMs)
+          : null;
+        const cancelOnClose = () => {
+          if (!responseDone) controller.abort();
+        };
+        res.on("close", cancelOnClose);
+
+        try {
+          startMessage();
+          const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
+            signal: controller.signal,
+            model: providerModel.model,
+            tools: body?.tools,
+            toolChoice: body?.tool_choice,
+            onDelta: (delta) => {
+              if (!delta || res.destroyed) return;
+              startTextBlock();
+              streamedChars += delta.length;
+              writeClaudeEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: nextBlockIndex,
+                delta: { type: "text_delta", text: delta },
+              });
+              flushResponse(res);
+            },
+          });
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          finishRequest(true, {
+            outputChars: result.turn.text.length,
+            upstreamBytes: result.bytes,
+            stringCount: result.eventCount,
+            deltaCount: result.deltaCount,
+          });
+          if (res.destroyed) return;
+          if (streamedChars === 0 && result.turn.text) {
+            startTextBlock();
+            streamedChars += result.turn.text.length;
+            writeClaudeEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: nextBlockIndex,
+              delta: { type: "text_delta", text: result.turn.text },
+            });
+          }
+          stopTextBlock();
+          const toolUses = Array.isArray(result.turn.toolUses) ? result.turn.toolUses : [];
+          if (toolUses.length > 0) writeToolUses(toolUses);
+          writeClaudeEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: toolUses.length > 0 ? "tool_use" : "end_turn", stop_sequence: null },
+            usage: estimateClaudeUsage(prompt, result.turn.text),
+          });
+          writeClaudeEvent("message_stop", { type: "message_stop" });
+          responseDone = true;
+          res.end();
+        } catch (error) {
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          const message = error instanceof Error ? error.message : String(error);
+          finishRequest(false, { error: message });
+          if (res.destroyed) return;
+          startMessage();
+          writeClaudeEvent("error", {
+            type: "error",
+            error: { type: "api_error", message },
+          });
+          responseDone = true;
+          res.end();
+        } finally {
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          res.off("close", cancelOnClose);
+        }
+        return;
+      }
+
+      try {
+        const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
+          model: providerModel.model,
+          tools: body?.tools,
+          toolChoice: body?.tool_choice,
+        });
+        finishRequest(true, {
+          outputChars: result.turn.text.length,
+          upstreamBytes: result.bytes,
+          stringCount: result.eventCount,
+          deltaCount: result.deltaCount,
+        });
+        const response = json(200, createClaudeMessageFromProviderTurn(result.turn, {
+          id: `msg_codebuddy_${Date.now()}`,
+          model: requestedModel,
+          prompt,
+        }));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        finishRequest(false, { error: message });
+        const response = openAiError(502, "upstream_error", message);
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
     const requestedModel = normalizePublicModelName(rawRequestedModel);
     const model = normalizeDirectModel(requestedModel);
     const claudeToolOptions = { tools: body?.tools, toolChoice: body?.tool_choice };
@@ -3630,6 +4478,156 @@ async function handle(req, res) {
     }
 
     const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const providerModel = resolveGatewayProviderModel(body?.model);
+    if (providerModel.provider === "codebuddy") {
+      const prompt = buildPromptFromMessages(messages);
+      const streamRequested = body?.stream === true;
+      const finishRequest = beginTrackedRequest(providerModel.publicModel, prompt.length, { stream: streamRequested });
+      log("info", "codebuddy chat completion request", {
+        model: providerModel.model,
+        stream: streamRequested,
+        messages: messages.length,
+        promptChars: prompt.length,
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 120),
+      });
+
+      if (streamRequested) {
+        const id = `chatcmpl_codebuddy_${Date.now()}`;
+        const controller = new AbortController();
+        let responseStarted = false;
+        let responseDone = false;
+        let streamedChars = 0;
+
+        const startStream = () => {
+          if (responseStarted || res.destroyed) return;
+          responseStarted = true;
+          res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            "access-control-allow-origin": "*",
+          });
+          res.write(sse(createOpenAIChatCompletionStreamChunk(id, providerModel.publicModel, { role: "assistant" })));
+          flushResponse(res);
+        };
+        const writeToolCallChunks = (toolUses) => {
+          toolUses.forEach((tool, index) => {
+            res.write(sse(createOpenAIChatCompletionStreamChunk(id, providerModel.publicModel, {
+              tool_calls: [{
+                index,
+                id: tool.id || `call_${randomUUID().replace(/-/g, "")}`,
+                type: "function",
+                function: {
+                  name: tool.name || "tool",
+                  arguments: JSON.stringify(tool.input || {}),
+                },
+              }],
+            })));
+          });
+        };
+        const keepAliveMs = Math.max(0, Number(config.streamKeepAliveMs || 0));
+        const keepAliveTimer = keepAliveMs > 0
+          ? setInterval(() => {
+            if (responseDone || res.destroyed) return;
+            startStream();
+            res.write(": keep-alive\n\n");
+            flushResponse(res);
+          }, keepAliveMs)
+          : null;
+        const cancelOnClose = () => {
+          if (!responseDone) controller.abort();
+        };
+        res.on("close", cancelOnClose);
+
+        try {
+          const result = await runCodeBuddyCompletionFromPool(messages, {
+            signal: controller.signal,
+            model: providerModel.model,
+            tools: body?.tools,
+            toolChoice: body?.tool_choice,
+            onDelta: (delta) => {
+              if (!delta || res.destroyed) return;
+              startStream();
+              streamedChars += delta.length;
+              res.write(sse(createOpenAIChatCompletionStreamChunk(id, providerModel.publicModel, { content: delta })));
+              flushResponse(res);
+            },
+          });
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          finishRequest(true, {
+            outputChars: result.turn.text.length,
+            upstreamBytes: result.bytes,
+            stringCount: result.eventCount,
+            deltaCount: result.deltaCount,
+          });
+          if (res.destroyed) return;
+          startStream();
+          if (streamedChars === 0 && result.turn.text) {
+            streamedChars += result.turn.text.length;
+            res.write(sse(createOpenAIChatCompletionStreamChunk(id, providerModel.publicModel, { content: result.turn.text })));
+          }
+          const toolUses = Array.isArray(result.turn.toolUses) ? result.turn.toolUses : [];
+          if (toolUses.length > 0) writeToolCallChunks(toolUses);
+          res.write(sse(createOpenAIChatCompletionStreamChunk(
+            id,
+            providerModel.publicModel,
+            {},
+            toolUses.length > 0 ? "tool_calls" : "stop",
+          )));
+          res.write("data: [DONE]\n\n");
+          responseDone = true;
+          res.end();
+        } catch (error) {
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          const message = error instanceof Error ? error.message : String(error);
+          finishRequest(false, { error: message });
+          if (res.destroyed) return;
+          if (responseStarted) {
+            res.write(sse({ error: { message, type: "upstream_error" } }));
+            res.write("data: [DONE]\n\n");
+            responseDone = true;
+            res.end();
+          } else {
+            const response = openAiError(502, "upstream_error", message);
+            responseDone = true;
+            res.writeHead(response.status, response.headers);
+            res.end(response.body);
+          }
+        } finally {
+          if (keepAliveTimer) clearInterval(keepAliveTimer);
+          res.off("close", cancelOnClose);
+        }
+        return;
+      }
+
+      try {
+        const result = await runCodeBuddyCompletionFromPool(messages, {
+          model: providerModel.model,
+          tools: body?.tools,
+          toolChoice: body?.tool_choice,
+        });
+        finishRequest(true, {
+          outputChars: result.turn.text.length,
+          upstreamBytes: result.bytes,
+          stringCount: result.eventCount,
+          deltaCount: result.deltaCount,
+        });
+        const response = json(200, createOpenAIChatCompletionFromProviderTurn(result.turn, {
+          id: `chatcmpl_codebuddy_${Date.now()}`,
+          model: providerModel.publicModel,
+          prompt,
+        }));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        finishRequest(false, { error: message });
+        const response = openAiError(502, "upstream_error", message);
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
     const model = normalizeDirectModel(body?.model);
     const prompt = buildPromptFromMessages(messages);
     const streamRequested = body?.stream === true;
@@ -3810,6 +4808,7 @@ export {
   parseClaudeToolUse,
   pickAssistantCandidate,
   pickAssistantText,
+  resolveGatewayProviderModel,
   runDirectCompletionWithRetry,
   selectDirectAccount,
   setMetadataCache,
