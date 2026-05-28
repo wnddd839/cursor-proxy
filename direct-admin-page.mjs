@@ -11,7 +11,7 @@ export function buildDirectAdminHtml() {
 </head>
 <body>
   <div class="login-wrap" id="loginView">
-    <section class="login">
+    <section class="login" data-motion>
       <div class="brand">
         <div class="mark">CD</div>
         <div>
@@ -33,7 +33,7 @@ export function buildDirectAdminHtml() {
   </div>
 
   <main class="shell hidden" id="appView">
-    <header class="topbar">
+    <header class="topbar" data-motion>
       <div class="brand">
         <div class="mark">CD</div>
         <div>
@@ -48,7 +48,7 @@ export function buildDirectAdminHtml() {
       </div>
     </header>
 
-    <section class="hero-panel">
+    <section class="hero-panel" data-motion>
       <div class="hero-head">
         <div>
           <div class="hero-kicker">Direct Gateway · 账号池控制台</div>
@@ -63,32 +63,32 @@ export function buildDirectAdminHtml() {
       </div>
 
       <section class="metric-grid six">
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">账号总数</div>
           <div class="value" id="metricTotal">0</div>
           <div class="hint">号池内全部账号</div>
         </div>
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">启用账号</div>
           <div class="value" id="metricEnabled">0</div>
           <div class="hint">参与轮询</div>
         </div>
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">禁用账号</div>
           <div class="value" id="metricDisabled">0</div>
           <div class="hint">已暂停使用</div>
         </div>
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">最近延迟</div>
           <div class="value" id="metricLatency">-</div>
           <div class="hint" id="metricAvgLatency">平均 -</div>
         </div>
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">总请求</div>
           <div class="value" id="metricRequests">0</div>
           <div class="hint" id="metricReqHint">成功 0 / 失败 0</div>
         </div>
-        <div class="metric">
+        <div class="metric" data-motion>
           <div class="label">NewAPI Base URL</div>
           <div class="value" id="metricBaseUrl" title="-">-</div>
           <div class="hint"><button type="button" class="btn-sm" id="copyBaseInlineBtn">复制地址</button></div>
@@ -97,7 +97,7 @@ export function buildDirectAdminHtml() {
     </section>
 
     <div class="content">
-      <section class="panel">
+      <section class="panel" data-motion>
         <div class="section-head">
           <h2>账号池</h2>
           <span class="section-note" id="accountPoolNote">正在加载...</span>
@@ -129,7 +129,7 @@ export function buildDirectAdminHtml() {
       </section>
 
       <section class="ops-grid">
-        <div class="panel">
+        <div class="panel" data-motion>
           <h2>添加账号</h2>
           <div class="import-tabs">
             <button type="button" class="active" id="importTabSingle">单个 auth.json</button>
@@ -154,7 +154,7 @@ export function buildDirectAdminHtml() {
           <div class="toast" id="importToast" style="margin-top: 10px;"></div>
         </div>
 
-        <div class="panel">
+        <div class="panel" data-motion>
           <h2>OAuth 登录</h2>
           <div class="row">
             <button class="primary" id="oauthStartBtn">生成 Cursor OAuth 授权链接</button>
@@ -181,7 +181,7 @@ export function buildDirectAdminHtml() {
       </section>
 
       <section class="ops-grid">
-        <div class="panel">
+        <div class="panel" data-motion>
           <h2>运行诊断</h2>
           <div class="split">
             <div class="field">
@@ -207,16 +207,17 @@ export function buildDirectAdminHtml() {
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel" data-motion>
           <h2>NewAPI 接入</h2>
           <div class="copyline" style="margin-bottom: 12px;">
             <input id="baseUrlInput" readonly />
             <button id="copyBaseHeroBtn" type="button">复制</button>
           </div>
-          <div class="copyline" style="margin-bottom: 12px;">
-            <input id="apiKeyPreview" readonly placeholder="API Key 未配置" />
+          <div class="copyline" style="margin-bottom: 8px;">
+            <input id="apiKeyDisplay" class="secret-input" type="password" readonly placeholder="API Key 未配置" />
             <button id="copyApiKeyBtn" type="button">复制 API Key</button>
           </div>
+          <div class="secret-hint">API Key 只在点击复制时请求，页面不明文展示。</div>
           <div class="endpoint-list" id="endpointList"></div>
           <h2 style="margin-top: 18px;">模型列表</h2>
           <div class="table-wrap">
@@ -228,7 +229,7 @@ export function buildDirectAdminHtml() {
         </div>
       </section>
 
-      <details class="advanced-panel">
+      <details class="advanced-panel" data-motion>
         <summary>高级调试信息（默认折叠）</summary>
         <div class="advanced-body stack">
           <div class="field">
@@ -260,13 +261,24 @@ export function buildDirectAdminHtml() {
       accountsPayload: null,
       models: [],
       oauthPayload: null,
+      clientBaseUrl: '',
       busy: false,
     };
     const $ = (id) => document.getElementById(id);
 
+    function kickoffMotion(root = document) {
+      const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const nodes = Array.from(root.querySelectorAll('[data-motion]'));
+      nodes.forEach((node, index) => {
+        node.classList.remove('css-enter');
+        node.style.setProperty('--motion-delay', reduceMotion ? '0ms' : String(Math.min(index * 35, 280)) + 'ms');
+        requestAnimationFrame(() => node.classList.add('css-enter'));
+      });
+    }
     function setLoginVisible(visible) {
       $('loginView').classList.toggle('hidden', !visible);
       $('appView').classList.toggle('hidden', visible);
+      requestAnimationFrame(() => kickoffMotion(visible ? $('loginView') : $('appView')));
     }
     function setInlineToast(id, text) {
       const node = $(id);
@@ -336,8 +348,9 @@ export function buildDirectAdminHtml() {
       const baseNode = $('metricBaseUrl');
       baseNode.textContent = truncateText(baseUrl, 28);
       baseNode.title = baseUrl;
+      state.clientBaseUrl = baseUrl;
       $('baseUrlInput').value = baseUrl;
-      $('apiKeyPreview').value = status.apiKeyConfigured ? (status.apiKeyPreview || '已配置，点击复制') : 'API Key 未配置';
+      $('apiKeyDisplay').value = status.apiKeyConfigured ? (status.apiKeyPreview || '已配置，点击复制') : 'API Key 未配置';
       $('copyApiKeyBtn').disabled = !status.apiKeyConfigured;
       $('endpointList').innerHTML = [
         renderEndpoint('GET', healthUrl),
@@ -639,14 +652,17 @@ export function buildDirectAdminHtml() {
         $('probeBtn').disabled = state.busy;
       }
     }
+    function resolveBaseUrl() {
+      return state.clientBaseUrl || (window.location.origin + '/v1');
+    }
     async function copyBaseUrl() {
-      const value = $('baseUrlInput').value || (window.location.origin + '/v1');
+      const value = resolveBaseUrl();
       await copyText(value, 'Base URL');
     }
     async function copyApiKey() {
       try {
         const result = await api('/client-config');
-        if (result && result.apiKeyPreview) $('apiKeyPreview').value = result.apiKeyPreview;
+        if (result && result.apiKeyPreview) $('apiKeyDisplay').value = result.apiKeyPreview;
         if (!result || !result.apiKey) {
           showToast('API Key 未配置');
           return;
@@ -697,6 +713,7 @@ export function buildDirectAdminHtml() {
       });
     });
 
+    requestAnimationFrame(() => kickoffMotion($('loginView')));
     if (state.remember && state.password) {
       $('adminPassword').value = state.password;
       login();

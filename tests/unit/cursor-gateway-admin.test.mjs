@@ -7,6 +7,7 @@ import {
   parseCursorAboutOutput,
   parseCursorLoginStatus,
 } from "../../cursor-gateway.mjs";
+import { buildDirectAdminHtml } from "../../direct-admin-page.mjs";
 
 test("extractCursorLoginUrl returns the loginDeepControl URL from wrapped CLI output", () => {
   const output = [
@@ -70,4 +71,22 @@ test("buildCursorAgentArgs uses stream-json output for streaming requests", () =
 
   assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
   assert.ok(args.includes("--stream-partial-output"));
+});
+
+test("direct admin renders a masked API key copy control", () => {
+  const html = buildDirectAdminHtml();
+
+  assert.match(html, /id="apiKeyDisplay"/);
+  assert.match(html, /type="password"/);
+  assert.match(html, /id="copyApiKeyBtn"/);
+  assert.doesNotMatch(html, /id="apiKeyPreview"/);
+});
+
+test("direct admin copies Base URL from page state instead of a transient input fallback", () => {
+  const html = buildDirectAdminHtml();
+
+  assert.match(html, /clientBaseUrl:/);
+  assert.match(html, /function resolveBaseUrl/);
+  assert.match(html, /state\.clientBaseUrl/);
+  assert.doesNotMatch(html, /baseUrlInput'\)\.value \|\|/);
 });

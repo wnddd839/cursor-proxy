@@ -1,25 +1,28 @@
 export function buildAdminSharedStyles() {
   return `
     :root {
-      --bg: #0b0e13;
-      --panel: #131820;
-      --panel-2: #1a2230;
-      --line: #273041;
-      --text: #e8edf5;
-      --muted: #94a3b8;
-      --faint: #64748b;
-      --accent: #34d399;
-      --accent-hover: #6ee7b7;
-      --accent-dim: rgba(52, 211, 153, 0.12);
-      --accent-line: rgba(52, 211, 153, 0.35);
-      --warn: #fbbf24;
-      --warn-dim: rgba(251, 191, 36, 0.12);
-      --bad: #f87171;
-      --bad-dim: rgba(248, 113, 113, 0.12);
-      --ink: #04120d;
-      --shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
-      --radius: 10px;
-      --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      --bg: #080b10;
+      --panel: rgba(16, 22, 31, 0.88);
+      --panel-2: #121a25;
+      --panel-3: #0e141d;
+      --line: rgba(139, 154, 177, 0.2);
+      --line-strong: rgba(177, 190, 211, 0.34);
+      --text: #eef4fb;
+      --muted: #a8b4c7;
+      --faint: #718097;
+      --accent: #49e6ae;
+      --accent-hover: #86f5c9;
+      --accent-2: #7dd3fc;
+      --accent-dim: rgba(73, 230, 174, 0.12);
+      --accent-line: rgba(73, 230, 174, 0.42);
+      --warn: #f8c96a;
+      --warn-dim: rgba(248, 201, 106, 0.13);
+      --bad: #ff7f8c;
+      --bad-dim: rgba(255, 127, 140, 0.13);
+      --ink: #06110d;
+      --shadow: 0 20px 54px rgba(0, 0, 0, 0.34);
+      --radius: 8px;
+      --font-ui: "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI Variable", "Segoe UI", sans-serif;
       --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
@@ -27,9 +30,10 @@ export function buildAdminSharedStyles() {
       margin: 0;
       min-height: 100%;
       background:
-        radial-gradient(circle at 12% -8%, rgba(52, 211, 153, 0.12), transparent 28%),
-        radial-gradient(circle at 88% 0%, rgba(96, 165, 250, 0.08), transparent 24%),
-        linear-gradient(180deg, #090c11 0%, #0b0e13 48%, #0a0d12 100%);
+        linear-gradient(135deg, rgba(73, 230, 174, 0.12) 0%, rgba(73, 230, 174, 0) 38%),
+        linear-gradient(225deg, rgba(125, 211, 252, 0.1) 0%, rgba(125, 211, 252, 0) 34%),
+        linear-gradient(180deg, #070a0f 0%, #0a0f16 46%, #070a0f 100%);
+      background-attachment: fixed;
       color: var(--text);
       font: 14px/1.55 var(--font-ui);
     }
@@ -38,11 +42,12 @@ export function buildAdminSharedStyles() {
       position: fixed;
       inset: 0;
       pointer-events: none;
-      opacity: 0.08;
+      opacity: 0.09;
       background-image:
         linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
       background-size: 28px 28px;
+      mask-image: linear-gradient(180deg, black, transparent 72%);
     }
     button, input, textarea, select { font: inherit; }
     button {
@@ -50,24 +55,30 @@ export function buildAdminSharedStyles() {
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 9px 14px;
-      background: var(--panel-2);
+      background: linear-gradient(180deg, rgba(31, 42, 57, 0.96), rgba(21, 29, 41, 0.96));
       color: var(--text);
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
+      transition: border-color 0.18s, background 0.18s, transform 0.18s, box-shadow 0.18s;
     }
-    button:hover:not(:disabled) { border-color: #3f5168; background: #202838; }
+    button:hover:not(:disabled) {
+      border-color: var(--line-strong);
+      background: linear-gradient(180deg, rgba(39, 52, 70, 0.98), rgba(25, 35, 49, 0.98));
+      transform: translateY(-1px);
+      box-shadow: 0 10px 22px rgba(0, 0, 0, 0.22);
+    }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
     button.primary {
       background: linear-gradient(180deg, #3ee0a5, #22c58b);
       border-color: #6ee7b7;
       color: var(--ink);
       font-weight: 700;
+      box-shadow: 0 10px 28px rgba(52, 211, 153, 0.18);
     }
     button.primary:hover:not(:disabled) {
       background: linear-gradient(180deg, #6ee7b7, #34d399);
       border-color: #a7f3d0;
     }
-    button.ghost { background: transparent; }
+    button.ghost { background: rgba(255, 255, 255, 0.02); }
     button.warn {
       background: var(--warn-dim);
       border-color: rgba(251, 191, 36, 0.4);
@@ -88,9 +99,10 @@ export function buildAdminSharedStyles() {
       border: 1px solid var(--line);
       border-radius: 8px;
       color: var(--text);
-      background: #0d1219;
+      background: rgba(8, 12, 18, 0.86);
       padding: 10px 12px;
       outline: none;
+      transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
     }
     input:focus, textarea:focus, select:focus {
       border-color: var(--accent-line);
@@ -109,49 +121,65 @@ export function buildAdminSharedStyles() {
     .hidden { display: none !important; }
     .shell {
       position: relative;
-      max-width: 1440px;
+      max-width: 1480px;
       margin: 0 auto;
-      padding: 20px 22px 32px;
+      padding: 18px 22px 36px;
     }
-    .topbar, .panel, .login, .metric, .hero-panel {
+    .topbar, .panel, .login, .metric {
       border: 1px solid var(--line);
-      background: rgba(19, 24, 32, 0.92);
+      background: var(--panel);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(14px);
     }
     .topbar {
+      position: sticky;
+      top: 12px;
+      z-index: 20;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 16px 18px;
+      padding: 14px 16px;
+      overflow: hidden;
+    }
+    .topbar::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent-line), transparent);
     }
     .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .mark {
       width: 42px;
       height: 42px;
-      border-radius: 10px;
-      background: linear-gradient(145deg, #34d399, #10b981);
+      border-radius: 8px;
+      background:
+        linear-gradient(145deg, rgba(73, 230, 174, 0.95), rgba(125, 211, 252, 0.86)),
+        #34d399;
       color: var(--ink);
       display: grid;
       place-items: center;
       font: 800 14px/1 var(--font-mono);
       flex-shrink: 0;
+      box-shadow: 0 12px 26px rgba(73, 230, 174, 0.16);
     }
     .title { font-size: 18px; font-weight: 750; line-height: 1.2; letter-spacing: -0.01em; }
     .sub { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
     .actions, .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .hero-panel {
-      margin-top: 16px;
-      padding: 18px 20px;
+      margin-top: 22px;
+      padding: 8px 2px 0;
       display: grid;
-      gap: 16px;
+      gap: 18px;
     }
     .hero-head {
       display: flex;
       justify-content: space-between;
-      gap: 16px;
+      gap: 24px;
       align-items: flex-start;
       flex-wrap: wrap;
     }
@@ -163,13 +191,14 @@ export function buildAdminSharedStyles() {
       text-transform: uppercase;
     }
     .hero-title {
-      margin-top: 6px;
-      font-size: 22px;
-      font-weight: 750;
-      line-height: 1.2;
-      letter-spacing: -0.02em;
+      margin-top: 7px;
+      max-width: 980px;
+      font-size: clamp(24px, 3vw, 38px);
+      font-weight: 780;
+      line-height: 1.08;
+      letter-spacing: 0;
     }
-    .hero-copy { margin-top: 8px; max-width: 760px; color: var(--muted); font-size: 13px; }
+    .hero-copy { margin-top: 10px; max-width: 820px; color: var(--muted); font-size: 14px; }
     .hero-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     .status-pills { display: flex; gap: 8px; flex-wrap: wrap; }
     .pill {
@@ -180,7 +209,7 @@ export function buildAdminSharedStyles() {
       border-radius: 999px;
       padding: 6px 10px;
       color: var(--muted);
-      background: rgba(13, 18, 25, 0.8);
+      background: rgba(10, 15, 22, 0.72);
       font-size: 12px;
       white-space: nowrap;
     }
@@ -194,10 +223,27 @@ export function buildAdminSharedStyles() {
       gap: 12px;
     }
     .metric {
-      padding: 14px 16px;
-      min-height: 96px;
+      position: relative;
+      padding: 15px 16px;
+      min-height: 100px;
       display: flex;
       flex-direction: column;
+      overflow: hidden;
+      transition: border-color 0.18s, transform 0.18s, background 0.18s;
+      will-change: transform;
+    }
+    .metric::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      opacity: 0.55;
+    }
+    .metric:hover {
+      border-color: var(--line-strong);
+      transform: translateY(-2px);
+      background: rgba(18, 27, 39, 0.92);
     }
     .metric .label {
       color: var(--muted);
@@ -207,8 +253,8 @@ export function buildAdminSharedStyles() {
       margin: 0;
     }
     .metric .value {
-      margin-top: 8px;
-      font: 700 22px/1.15 var(--font-mono);
+      margin-top: 9px;
+      font: 760 22px/1.15 var(--font-mono);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -222,8 +268,16 @@ export function buildAdminSharedStyles() {
       line-height: 1.35;
     }
     .metric .hint { margin-top: auto; padding-top: 8px; color: var(--faint); font-size: 12px; }
-    .content { display: grid; gap: 16px; margin-top: 16px; }
-    .panel { padding: 18px 20px; }
+    .content { display: grid; gap: 16px; margin-top: 18px; }
+    .panel {
+      padding: 18px 20px;
+      transition: border-color 0.18s, background 0.18s, transform 0.18s;
+      will-change: transform;
+    }
+    .panel:hover {
+      border-color: rgba(177, 190, 211, 0.28);
+      background: rgba(17, 24, 35, 0.92);
+    }
     .panel h2 {
       margin: 0 0 14px;
       font-size: 15px;
@@ -237,7 +291,12 @@ export function buildAdminSharedStyles() {
     }
     .stack { display: grid; gap: 12px; }
     .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(7, 11, 16, 0.5);
+    }
     .table { width: 100%; border-collapse: collapse; min-width: 520px; }
     .table th, .table td {
       text-align: left;
@@ -250,13 +309,17 @@ export function buildAdminSharedStyles() {
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.08em;
-      background: rgba(13, 18, 25, 0.6);
+      background: rgba(11, 16, 23, 0.92);
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     .table tr:last-child td { border-bottom: none; }
+    .table tbody tr:hover td { background: rgba(125, 211, 252, 0.035); }
     .mono, .mono-box {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0d1219;
+      background: rgba(8, 12, 18, 0.86);
       color: var(--muted);
       padding: 12px 14px;
       white-space: pre-wrap;
@@ -267,10 +330,19 @@ export function buildAdminSharedStyles() {
     }
     .copyline { display: flex; gap: 8px; align-items: stretch; }
     .copyline input { min-width: 0; font-family: var(--font-mono); font-size: 13px; }
+    .secret-input {
+      letter-spacing: 0.08em;
+      color: var(--accent-2);
+    }
+    .secret-hint {
+      margin: -4px 0 12px;
+      color: var(--faint);
+      font-size: 12px;
+    }
     .account-card {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0d1219;
+      background: rgba(8, 12, 18, 0.86);
       padding: 14px 16px;
       display: grid;
       gap: 12px;
@@ -308,7 +380,13 @@ export function buildAdminSharedStyles() {
       padding: 10px 12px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0d1219;
+      background: rgba(8, 12, 18, 0.86);
+      transition: border-color 0.18s, transform 0.18s, background 0.18s;
+    }
+    .endpoint-row:hover {
+      border-color: var(--line-strong);
+      transform: translateY(-1px);
+      background: rgba(12, 19, 28, 0.92);
     }
     .endpoint-method {
       font: 700 11px/1 var(--font-mono);
@@ -354,7 +432,7 @@ export function buildAdminSharedStyles() {
     details.advanced-panel {
       border: 1px solid var(--line);
       border-radius: var(--radius);
-      background: rgba(19, 24, 32, 0.92);
+      background: var(--panel);
       overflow: hidden;
     }
     details.advanced-panel summary {
@@ -383,7 +461,7 @@ export function buildAdminSharedStyles() {
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.2s, transform 0.2s;
-      background: rgba(19, 24, 32, 0.96);
+      background: rgba(16, 22, 31, 0.96);
       border: 1px solid var(--accent-line);
       color: var(--text);
       padding: 10px 16px;
@@ -452,7 +530,7 @@ export function buildAdminSharedStyles() {
     .oauth-box {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #0d1219;
+      background: rgba(8, 12, 18, 0.86);
       padding: 12px 14px;
       font-family: var(--font-mono);
       font-size: 12px;
@@ -464,6 +542,23 @@ export function buildAdminSharedStyles() {
       color: var(--muted);
       font-size: 13px;
       padding: 8px 0;
+    }
+    [data-motion] { will-change: transform, opacity; }
+    .css-enter {
+      animation: admin-enter 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      animation-delay: var(--motion-delay, 0ms);
+    }
+    @keyframes admin-enter {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.001ms !important;
+      }
     }
     @media (max-width: 1100px) {
       .metric-grid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
