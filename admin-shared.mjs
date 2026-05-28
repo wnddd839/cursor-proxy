@@ -172,6 +172,42 @@ export function buildAdminSharedStyles() {
       overflow-wrap: anywhere;
     }
     .topbar-actions, .actions, .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+    /* === VIEW NAV === */
+    .view-nav {
+      display: flex;
+      gap: 2px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px;
+    }
+    .view-tab {
+      min-height: 32px;
+      padding: 6px 16px;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
+      white-space: nowrap;
+      box-shadow: none;
+    }
+    .view-tab:hover:not(.active):not(:disabled) {
+      color: var(--text);
+      background: rgba(0,0,0,0.03);
+      border-color: transparent;
+      box-shadow: none;
+    }
+    .view-tab.active {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: var(--shadow-sm);
+      font-weight: 600;
+    }
     .pill {
       display: inline-flex;
       align-items: center;
@@ -184,6 +220,8 @@ export function buildAdminSharedStyles() {
     .pill.good { background: var(--success-bg); color: var(--success-text); }
     .pill.bad { background: var(--danger-bg); color: var(--danger-text); }
     .pill.warn { background: var(--warn-bg); color: var(--warn-text); }
+    .pill.info { background: var(--info-bg); color: var(--info-text); }
+    .pill.muted { background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border); }
     .status-indicator {
       display: inline-flex;
       align-items: center;
@@ -515,6 +553,72 @@ export function buildAdminSharedStyles() {
     .probe-result.fail .probe-line strong { color: var(--danger-text); }
     .probe-result.ok .probe-line strong { color: var(--success-text); }
 
+    /* === SUBSECTION === */
+    .subsection {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px dashed var(--border);
+    }
+    .subsection-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .subsection-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: 0.01em;
+    }
+    .subsection-title .tag {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 400;
+      margin-left: 8px;
+      letter-spacing: 0.04em;
+    }
+    .subsection-note {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .codebuddy-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px 16px;
+      padding: 14px 16px;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+    }
+    .codebuddy-summary .kv {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .codebuddy-summary .kv-label {
+      color: var(--text-muted);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .codebuddy-summary .kv-value {
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .codebuddy-summary .kv-value.mono {
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
     /* === SECTION HEAD === */
     .section-head {
       display: flex;
@@ -737,6 +841,8 @@ export function buildAdminSharedStyles() {
     }
     @media (max-width: 640px) {
       .topbar { padding: 12px 16px; flex-wrap: wrap; }
+      .view-nav { width: 100%; order: 3; }
+      .view-tab { flex: 1; text-align: center; padding: 6px 8px; font-size: 12px; }
       .shell { padding: 16px 12px; }
       .metric-grid { grid-template-columns: 1fr; gap: 12px; }
       .metric { padding: 16px 18px; }

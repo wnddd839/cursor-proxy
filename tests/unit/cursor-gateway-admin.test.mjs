@@ -173,3 +173,103 @@ test("direct admin renders advanced debug details panel", () => {
   assert.match(html, /id="debugAccounts"/);
   assert.match(html, /id="debugOAuth"/);
 });
+
+test("direct admin renders the CodeBuddy management panel structure", () => {
+  const html = buildDirectAdminHtml();
+
+  assert.match(html, /id="codebuddyPanel"/);
+  assert.match(html, /CodeBuddy Provider/);
+  assert.match(html, /id="codebuddyConfigPill"/);
+  assert.match(html, /id="codebuddyAuthPill"/);
+  assert.match(html, /id="codebuddyBaseUrl"/);
+  assert.match(html, /id="codebuddyAccountSummary"/);
+  assert.match(html, /id="codebuddyAccountRows"/);
+  assert.match(html, /id="codebuddyModelRows"/);
+  assert.match(html, /id="codebuddyImportTabs"/);
+  assert.match(html, /data-cb-tab="single"/);
+  assert.match(html, /data-cb-tab="batch"/);
+  assert.match(html, /id="cbImportAuthToken"/);
+  assert.match(html, /id="cbImportApiKey"/);
+  assert.match(html, /id="cbImportApiKeyHelper"/);
+  assert.match(html, /id="cbImportBaseUrl"/);
+  assert.match(html, /id="cbImportInternetEnv"/);
+  assert.match(html, /id="cbProbeBtn"/);
+  assert.match(html, /id="cbProbeBox"/);
+});
+
+test("direct admin wires CodeBuddy state and refresh logic", () => {
+  const html = buildDirectAdminHtml();
+
+  // state slot
+  assert.match(html, /codebuddy:\s*\{/);
+  assert.match(html, /importMode:\s*'single'/);
+  assert.match(html, /unsupported:\s*false/);
+  // core helpers exist
+  assert.match(html, /function refreshCodeBuddy/);
+  assert.match(html, /function renderCodeBuddy\b/);
+  assert.match(html, /function importCodeBuddyAccounts/);
+  assert.match(html, /function codeBuddyAccountAction/);
+  assert.match(html, /function runCodeBuddyProbe/);
+  assert.match(html, /function loadCodeBuddyModels/);
+  // hits the documented backend routes
+  assert.match(html, /\/codebuddy\/status/);
+  assert.match(html, /\/codebuddy\/accounts/);
+  assert.match(html, /\/codebuddy\/accounts\/import/);
+  assert.match(html, /\/codebuddy\/models/);
+  assert.match(html, /\/codebuddy\/probe/);
+  // setActiveView hooks the codebuddy refresh, but normal Cursor refresh stays scoped
+  assert.match(html, /refreshCodeBuddy\(true\)/);
+  assert.doesNotMatch(html, /renderAll\(\);\s*try\s*\{\s*await refreshCodeBuddy\(true\);/);
+});
+
+test("direct admin handles missing CodeBuddy backend routes gracefully", () => {
+  const html = buildDirectAdminHtml();
+
+  assert.match(html, /error\.status = response\.status/);
+  assert.match(html, /statusRes\.__error\.status === 404/);
+  assert.match(html, /CodeBuddy 后端管理接口未启用/);
+  assert.match(html, /CodeBuddy 后端模型接口尚未启用/);
+  assert.match(html, /当前仅保留前端视图入口/);
+});
+
+test("direct admin renders the view nav and view containers", () => {
+  const html = buildDirectAdminHtml();
+
+  // Topbar nav present
+  assert.match(html, /class="view-nav"/);
+  assert.match(html, /id="viewNav"/);
+  assert.match(html, /class="view-tab active" data-view="cursor"/);
+  assert.match(html, /data-view="codebuddy"/);
+  assert.match(html, /Cursor Direct<\/button>/);
+  assert.match(html, /CodeBuddy<\/button>/);
+  // View containers wrap dashboard / codebuddy panels
+  assert.match(html, /id="cursorView"/);
+  assert.match(html, /id="codebuddyView" class="hidden"/);
+});
+
+test("direct admin wires setActiveView with hash deep linking", () => {
+  const html = buildDirectAdminHtml();
+
+  // state slot for active view
+  assert.match(html, /activeView:\s*'cursor'/);
+  // function definition
+  assert.match(html, /function setActiveView/);
+  // hash deep link via history.replaceState + hashchange
+  assert.match(html, /history\.replaceState\(null, '', '#' \+ view\)/);
+  assert.match(html, /addEventListener\('hashchange'/);
+  // skipRefresh used during initial bootstrap
+  assert.match(html, /skipRefresh:\s*true/);
+});
+
+test("direct admin keeps recent manual style edits intact", () => {
+  const html = buildDirectAdminHtml();
+
+  // radius-lg is now 8px (not 12px)
+  assert.match(html, /--radius-lg:\s*8px/);
+  assert.doesNotMatch(html, /--radius-lg:\s*12px/);
+  // metric .value letter-spacing reset to 0
+  assert.match(html, /\.metric \.value\s*\{[\s\S]*?letter-spacing:\s*0;/);
+  // pulse-once helpers removed
+  assert.doesNotMatch(html, /pulse-once/);
+  assert.doesNotMatch(html, /pulseElement/);
+});

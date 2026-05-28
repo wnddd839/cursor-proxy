@@ -38,6 +38,10 @@ export function buildDirectAdminHtml() {
       <span class="brand-name">Cursor Direct Gateway</span>
       <span class="pill good" id="statusIndicator"><span id="statusIndicatorText">运行中</span></span>
     </div>
+    <nav class="view-nav" id="viewNav">
+      <button type="button" class="view-tab active" data-view="cursor" onclick="setActiveView('cursor')">Cursor Direct</button>
+      <button type="button" class="view-tab" data-view="codebuddy" onclick="setActiveView('codebuddy')">CodeBuddy</button>
+    </nav>
     <div class="topbar-actions">
       <button id="refreshBtn">刷新全部</button>
       <button class="primary" id="copyBaseBtn">复制 Base URL</button>
@@ -46,6 +50,7 @@ export function buildDirectAdminHtml() {
   </header>
 
   <main class="shell hidden" id="appView">
+    <div id="cursorView">
     <section class="dashboard-header" data-motion>
       <div class="dh-title-row">
         <span class="dh-title">CURSOR DIRECT GATEWAY</span>
@@ -253,6 +258,156 @@ export function buildDirectAdminHtml() {
         </div>
       </details>
     </div>
+    </div>
+
+    <div id="codebuddyView" class="hidden">
+    <div class="content">
+      <section class="panel" id="codebuddyPanel" data-motion>
+        <div class="section-head">
+          <h2>CodeBuddy Provider <span class="h2-tag">CODEBUDDY</span></h2>
+          <div class="row" style="gap: 8px;">
+            <span class="pill muted" id="codebuddyConfigPill">未配置</span>
+            <span class="pill muted" id="codebuddyAuthPill">未登录</span>
+            <button type="button" class="ghost btn-sm" id="codebuddyRefreshBtn">刷新</button>
+          </div>
+        </div>
+        <div id="codebuddyLoading" class="loading-overlay hidden">正在刷新 CodeBuddy 数据...</div>
+        <div class="codebuddy-summary" id="codebuddySummary">
+          <div class="kv"><span class="kv-label">Provider</span><span class="kv-value" id="codebuddyProvider">codebuddy</span></div>
+          <div class="kv"><span class="kv-label">Base URL</span><span class="kv-value mono" id="codebuddyBaseUrl" title="-">-</span></div>
+          <div class="kv"><span class="kv-label">默认模型</span><span class="kv-value mono" id="codebuddyDefaultModel">codebuddy/default</span></div>
+          <div class="kv"><span class="kv-label">账号池</span><span class="kv-value" id="codebuddyAccountSummary">总计 0 · 启用 0 · 禁用 0</span></div>
+        </div>
+
+        <div class="subsection" style="margin-top: 4px; padding-top: 0; border-top: none;">
+          <div class="subsection-head">
+            <span class="subsection-title">账号池 <span class="tag">ACCOUNTS</span></span>
+            <span class="subsection-note" id="codebuddyAccountNote">正在加载...</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table dense">
+              <thead>
+                <tr>
+                  <th>备注</th>
+                  <th>类型</th>
+                  <th>登录</th>
+                  <th>状态</th>
+                  <th>Base URL</th>
+                  <th>Auth Token</th>
+                  <th>API Key</th>
+                  <th>Helper</th>
+                  <th>成功</th>
+                  <th>失败</th>
+                  <th>最后使用</th>
+                  <th>最后错误</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="codebuddyAccountRows">
+                <tr><td colspan="13" class="muted">正在读取账号池...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="subsection">
+          <div class="subsection-head">
+            <span class="subsection-title">可用模型 <span class="tag">MODELS</span></span>
+            <span class="subsection-note" id="codebuddyModelNote">-</span>
+          </div>
+          <div class="table-wrap">
+            <table class="table dense">
+              <thead><tr><th>模型 ID</th><th>名称</th><th>工具调用</th><th>图片</th></tr></thead>
+              <tbody id="codebuddyModelRows">
+                <tr><td colspan="4" class="muted">正在读取模型列表...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="subsection">
+          <div class="subsection-head">
+            <span class="subsection-title">导入账号 <span class="tag">INGEST</span></span>
+          </div>
+          <div class="import-tabs" id="codebuddyImportTabs">
+            <button type="button" class="active" data-cb-tab="single">单个账号</button>
+            <button type="button" data-cb-tab="batch">批量 JSON</button>
+          </div>
+          <div id="codebuddyImportSingle" class="import-pane">
+            <div class="split">
+              <div class="field">
+                <label for="cbImportLabel">备注 label</label>
+                <input id="cbImportLabel" placeholder="例如：CodeBuddy 主账号" />
+              </div>
+              <div class="field">
+                <label for="cbImportBaseUrl">Base URL（可选）</label>
+                <input id="cbImportBaseUrl" placeholder="http://127.0.0.1:8080" />
+              </div>
+            </div>
+            <div class="split">
+              <div class="field">
+                <label for="cbImportAuthToken">Auth Token</label>
+                <input id="cbImportAuthToken" type="password" autocomplete="off" placeholder="authToken" />
+              </div>
+              <div class="field">
+                <label for="cbImportApiKey">API Key</label>
+                <input id="cbImportApiKey" type="password" autocomplete="off" placeholder="apiKey" />
+              </div>
+            </div>
+            <div class="split">
+              <div class="field">
+                <label for="cbImportApiKeyHelper">API Key Helper（命令）</label>
+                <input id="cbImportApiKeyHelper" autocomplete="off" placeholder="可选 helper 命令" />
+              </div>
+              <div class="field">
+                <label for="cbImportInternetEnv">Internet Environment</label>
+                <input id="cbImportInternetEnv" placeholder="default / corp" />
+              </div>
+            </div>
+            <div class="row" style="margin-top: 12px;">
+              <button class="primary" id="cbImportBtn">导入 CodeBuddy 账号</button>
+            </div>
+            <div class="toast-line" id="cbImportToast"></div>
+          </div>
+          <div id="codebuddyImportBatch" class="import-pane hidden">
+            <div class="field">
+              <label for="cbImportBatchJson">批量 JSON</label>
+              <textarea id="cbImportBatchJson" placeholder='{"accounts":[{"label":"A","authToken":"...","apiKey":"...","baseUrl":"..."}]}'></textarea>
+            </div>
+            <div class="import-hint">支持 <code>{"accounts":[...]}</code> 或直接粘贴 JSON 数组。每条至少包含 <code>authToken</code> / <code>apiKey</code> / <code>apiKeyHelper</code> 之一。</div>
+            <div class="row">
+              <button class="primary" id="cbImportBatchBtn">批量导入</button>
+            </div>
+            <div class="toast-line" id="cbImportBatchToast"></div>
+          </div>
+        </div>
+
+        <div class="subsection">
+          <div class="subsection-head">
+            <span class="subsection-title">探针测试 <span class="tag">PROBE</span></span>
+          </div>
+          <div class="split">
+            <div class="field">
+              <label for="cbProbeModel">模型</label>
+              <select id="cbProbeModel">
+                <option value="codebuddy/default">codebuddy/default</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="cbProbeAccount">账号</label>
+              <select id="cbProbeAccount">
+                <option value="">自动轮询启用账号</option>
+              </select>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button class="primary" id="cbProbeBtn">运行 CodeBuddy 探针</button>
+          </div>
+          <pre class="probe-result" id="cbProbeBox"><span class="probe-line muted">// 还没有运行探针。</span></pre>
+        </div>
+      </section>
+    </div>
+    </div>
   </main>
 
   <script>
@@ -271,6 +426,14 @@ export function buildDirectAdminHtml() {
       busy: false,
       lastMetrics: { total: 0, enabled: 0, disabled: 0, requests: 0 },
       hasScanned: false,
+      activeView: 'cursor',
+      codebuddy: {
+        status: null,
+        accounts: null,
+        models: [],
+        importMode: 'single',
+        unsupported: false,
+      },
     };
     const $ = (id) => document.getElementById(id);
 
@@ -309,7 +472,40 @@ export function buildDirectAdminHtml() {
       $('probeBtn').disabled = flag;
       $('copyApiKeyBtn').disabled = flag || !(state.status && state.status.apiKeyConfigured);
       $('accountPoolLoading').classList.toggle('hidden', !flag);
+      const cbRefresh = $('codebuddyRefreshBtn');
+      if (cbRefresh) cbRefresh.disabled = flag;
+      const cbImportBtn = $('cbImportBtn');
+      if (cbImportBtn) cbImportBtn.disabled = flag;
+      const cbImportBatchBtn = $('cbImportBatchBtn');
+      if (cbImportBatchBtn) cbImportBatchBtn.disabled = flag;
+      const cbProbeBtn = $('cbProbeBtn');
+      if (cbProbeBtn) cbProbeBtn.disabled = flag;
+      const cbLoading = $('codebuddyLoading');
+      if (cbLoading) cbLoading.classList.toggle('hidden', !flag);
     }
+    function setActiveView(view, options) {
+      const opts = options || {};
+      if (view !== 'cursor' && view !== 'codebuddy') view = 'cursor';
+      state.activeView = view;
+      if (!opts.skipHash) {
+        try { history.replaceState(null, '', '#' + view); } catch (_e) {}
+      }
+      const cursorView = document.getElementById('cursorView');
+      const codebuddyView = document.getElementById('codebuddyView');
+      if (cursorView) cursorView.classList.toggle('hidden', view !== 'cursor');
+      if (codebuddyView) codebuddyView.classList.toggle('hidden', view !== 'codebuddy');
+      document.querySelectorAll('.view-tab').forEach((tab) => {
+        tab.classList.toggle('active', tab.getAttribute('data-view') === view);
+      });
+      if (!opts.skipRefresh) {
+        if (view === 'cursor') {
+          refreshAll(true).catch(() => {});
+        } else {
+          refreshCodeBuddy(true).catch(() => {});
+        }
+      }
+    }
+    window.setActiveView = setActiveView;
     function authHeaders() {
       return { 'X-Admin-Password': state.password, 'Authorization': 'Bearer ' + state.password };
     }
@@ -326,7 +522,10 @@ export function buildDirectAdminHtml() {
       if (response.status === 401) throw new Error('管理密码不正确');
       if (!response.ok) {
         const message = data && data.error && data.error.message ? data.error.message : response.statusText;
-        throw new Error(message || '请求失败');
+        const error = new Error(message || '请求失败');
+        error.status = response.status;
+        error.data = data;
+        throw error;
       }
       return data;
     }
@@ -489,6 +688,355 @@ export function buildDirectAdminHtml() {
       renderAccountPool();
       renderModels(state.models);
       renderOAuth();
+      renderCodeBuddy();
+    }
+    function codeBuddyAuthTypeLabel(type) {
+      switch (type) {
+        case 'api_key': return 'API Key';
+        case 'auth_token': return 'Auth Token';
+        case 'api_key_helper': return 'Helper';
+        default: return type || '-';
+      }
+    }
+    function codeBuddyLoggedInPill(value) {
+      if (value === true) return '<span class="pill good">是</span>';
+      if (value === false) return '<span class="pill bad">否</span>';
+      return '<span class="pill muted">未知</span>';
+    }
+    function codeBuddyBoolMark(value) {
+      if (value === true) return '<span class="pill good">✓</span>';
+      if (value === false) return '<span class="pill muted">–</span>';
+      return '<span class="pill muted">?</span>';
+    }
+    function codeBuddyAccountLabel(account) {
+      return account?.label || account?.userName || account?.userNickname || account?.id || '未命名账号';
+    }
+    function setCodeBuddyImportMode(mode) {
+      state.codebuddy.importMode = mode;
+      const tabs = $('codebuddyImportTabs');
+      if (tabs) {
+        tabs.querySelectorAll('button[data-cb-tab]').forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-cb-tab') === mode);
+        });
+      }
+      $('codebuddyImportSingle').classList.toggle('hidden', mode !== 'single');
+      $('codebuddyImportBatch').classList.toggle('hidden', mode !== 'batch');
+    }
+    function renderCodeBuddySummary() {
+      const status = state.codebuddy.status || {};
+      const pool = (state.codebuddy.accounts && typeof state.codebuddy.accounts === 'object')
+        ? state.codebuddy.accounts
+        : (status.accounts && typeof status.accounts === 'object' ? status.accounts : {});
+      const unsupported = Boolean(state.codebuddy.unsupported || status.unsupported);
+      const configured = !unsupported && Boolean(status && (status.configured === true || status.baseUrl));
+      const baseUrl = status.baseUrl || '-';
+      const models = Array.isArray(state.codebuddy.models) && state.codebuddy.models.length
+        ? state.codebuddy.models
+        : (Array.isArray(status.models) ? status.models : []);
+      const defaultModel = (models[0] && (models[0].id || models[0].modelId)) || 'codebuddy/default';
+
+      const configPill = $('codebuddyConfigPill');
+      configPill.textContent = unsupported ? '未接入' : (configured ? '已配置' : '未配置');
+      configPill.className = 'pill ' + (unsupported ? 'warn' : (configured ? 'good' : 'muted'));
+
+      const authPill = $('codebuddyAuthPill');
+      const loggedIn = pool && typeof pool.loggedIn === 'boolean' ? pool.loggedIn : null;
+      if (unsupported) {
+        authPill.textContent = '接口未启用';
+        authPill.className = 'pill muted';
+      } else if (loggedIn === true) {
+        authPill.textContent = '已登录';
+        authPill.className = 'pill good';
+      } else if (loggedIn === false) {
+        authPill.textContent = '未登录';
+        authPill.className = 'pill warn';
+      } else {
+        authPill.textContent = '状态未知';
+        authPill.className = 'pill muted';
+      }
+
+      $('codebuddyProvider').textContent = status.provider || 'codebuddy';
+      const baseNode = $('codebuddyBaseUrl');
+      baseNode.textContent = baseUrl;
+      baseNode.title = baseUrl;
+      $('codebuddyDefaultModel').textContent = defaultModel;
+
+      const total = pool.count || 0;
+      const enabled = pool.enabledCount || 0;
+      const disabled = pool.disabledCount || (total - enabled) || 0;
+      $('codebuddyAccountSummary').textContent = '总计 ' + total + ' · 启用 ' + enabled + ' · 禁用 ' + disabled;
+      $('codebuddyAccountNote').textContent = unsupported
+        ? '后端 CodeBuddy 管理接口未启用'
+        : total
+        ? ('共 ' + total + ' 个账号 · 启用 ' + enabled + ' · 禁用 ' + disabled)
+        : '账号池为空';
+    }
+    function renderCodeBuddyAccounts() {
+      const pool = (state.codebuddy.accounts && typeof state.codebuddy.accounts === 'object') ? state.codebuddy.accounts : {};
+      const accounts = Array.isArray(pool.accounts) ? pool.accounts : [];
+      const tbody = $('codebuddyAccountRows');
+      if (!tbody) return;
+      if (state.codebuddy.unsupported) {
+        tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">// CodeBuddy 后端管理接口尚未启用。当前仅保留前端视图入口。</div></td></tr>';
+        renderCodeBuddyProbeAccounts([]);
+        return;
+      }
+      if (!accounts.length) {
+        tbody.innerHTML = '<tr><td colspan="13"><div class="empty-state">// 账号池为空。请使用下方「导入账号」面板添加。</div></td></tr>';
+      } else {
+        tbody.innerHTML = accounts.map((account) => {
+          const id = escapeHtml(account.id || '');
+          const label = escapeHtml(account.label || '-');
+          const authType = escapeHtml(codeBuddyAuthTypeLabel(account.authType));
+          const baseUrl = escapeHtml(account.baseUrl || '-');
+          const tokenPreview = escapeHtml(account.authTokenPreview || '-');
+          const apiKeyPreview = escapeHtml(account.apiKeyPreview || '-');
+          const helperPreview = escapeHtml(account.apiKeyHelperPreview || '-');
+          const lastErr = escapeHtml(truncateText(account.lastError || '-', 32));
+          const enabled = account.enabled !== false;
+          const actions = [
+            enabled
+              ? '<button type="button" class="warn" data-cb-action="disable" data-id="' + id + '">禁用</button>'
+              : '<button type="button" class="primary" data-cb-action="enable" data-id="' + id + '">启用</button>',
+            '<button type="button" data-cb-action="probe" data-id="' + id + '">探针</button>',
+            '<button type="button" class="danger" data-cb-action="delete" data-id="' + id + '">删除</button>',
+          ].join('');
+          return '<tr>' +
+            '<td class="cell-wrap" title="' + label + '">' + label + '</td>' +
+            '<td>' + authType + '</td>' +
+            '<td>' + codeBuddyLoggedInPill(account.loggedIn) + '</td>' +
+            '<td>' + renderStatusBadge(enabled) + '</td>' +
+            '<td class="cell-mono" title="' + baseUrl + '">' + baseUrl + '</td>' +
+            '<td class="cell-mono" title="' + tokenPreview + '">' + tokenPreview + '</td>' +
+            '<td class="cell-mono" title="' + apiKeyPreview + '">' + apiKeyPreview + '</td>' +
+            '<td class="cell-mono" title="' + helperPreview + '">' + helperPreview + '</td>' +
+            '<td>' + escapeHtml(String(account.successRequests || 0)) + '</td>' +
+            '<td>' + escapeHtml(String(account.failedRequests || 0)) + '</td>' +
+            '<td>' + escapeHtml(fmtTime(account.lastUsedAt)) + '</td>' +
+            '<td class="cell-wrap" title="' + lastErr + '">' + lastErr + '</td>' +
+            '<td class="actions-cell">' + actions + '</td>' +
+          '</tr>';
+        }).join('');
+      }
+      renderCodeBuddyProbeAccounts(accounts);
+    }
+    function renderCodeBuddyProbeAccounts(accounts) {
+      const select = $('cbProbeAccount');
+      if (!select) return;
+      const current = select.value;
+      const options = ['<option value="">自动轮询启用账号</option>'].concat(
+        (accounts || []).map((account) => {
+          const text = codeBuddyAccountLabel(account) + (account.enabled === false ? '（已禁用）' : '');
+          return '<option value="' + escapeHtml(account.id || '') + '">' + escapeHtml(text) + '</option>';
+        }),
+      );
+      select.innerHTML = options.join('');
+      if (current && (accounts || []).some((item) => item.id === current)) select.value = current;
+    }
+    function renderCodeBuddyModels() {
+      const tbody = $('codebuddyModelRows');
+      if (!tbody) return;
+      const status = state.codebuddy.status || {};
+      if (state.codebuddy.unsupported) {
+        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">// CodeBuddy 后端模型接口尚未启用。</div></td></tr>';
+        $('codebuddyModelNote').textContent = '接口未启用';
+        return;
+      }
+      const models = Array.isArray(state.codebuddy.models) && state.codebuddy.models.length
+        ? state.codebuddy.models
+        : (Array.isArray(status.models) ? status.models : []);
+      if (!models.length) {
+        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">// 未返回模型。默认使用 codebuddy/default。</div></td></tr>';
+        $('codebuddyModelNote').textContent = '共 0 个模型';
+      } else {
+        tbody.innerHTML = models.map((model) => {
+          const id = escapeHtml(model.id || model.modelId || '-');
+          const name = escapeHtml(model.name || model.displayName || model.id || '-');
+          const tools = codeBuddyBoolMark(model.supportsTools);
+          const images = codeBuddyBoolMark(model.supportsImages);
+          return '<tr>' +
+            '<td class="cell-mono" title="' + id + '">' + id + '</td>' +
+            '<td>' + name + '</td>' +
+            '<td>' + tools + '</td>' +
+            '<td>' + images + '</td>' +
+          '</tr>';
+        }).join('');
+        $('codebuddyModelNote').textContent = '共 ' + models.length + ' 个模型';
+      }
+      const select = $('cbProbeModel');
+      if (select) {
+        const current = select.value;
+        const ids = Array.from(new Set(['codebuddy/default'].concat((models || []).map((m) => m.id || m.modelId).filter(Boolean))));
+        select.innerHTML = ids.map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + '</option>').join('');
+        select.value = ids.includes(current) ? current : (ids[0] || 'codebuddy/default');
+      }
+    }
+    function renderCodeBuddy() {
+      renderCodeBuddySummary();
+      renderCodeBuddyAccounts();
+      renderCodeBuddyModels();
+    }
+    async function loadCodeBuddyModels() {
+      if (state.codebuddy.unsupported) {
+        state.codebuddy.models = [];
+        return;
+      }
+      try {
+        const payload = await api('/codebuddy/models');
+        if (payload && payload.ok && Array.isArray(payload.models)) {
+          state.codebuddy.models = payload.models;
+        } else {
+          state.codebuddy.models = [];
+        }
+      } catch (error) {
+        state.codebuddy.models = [];
+        const tbody = $('codebuddyModelRows');
+        if (tbody) tbody.innerHTML = '<tr><td colspan="4" class="muted">' + escapeHtml(error.message) + '</td></tr>';
+      }
+    }
+    async function refreshCodeBuddy(silent) {
+      try {
+        const statusRes = await api('/codebuddy/status').catch((error) => ({ __error: error }));
+        if (statusRes && statusRes.__error && statusRes.__error.status === 404) {
+          state.codebuddy.unsupported = true;
+          state.codebuddy.status = { provider: 'codebuddy', unsupported: true };
+          state.codebuddy.accounts = { count: 0, enabledCount: 0, disabledCount: 0, accounts: [] };
+          state.codebuddy.models = [];
+          renderCodeBuddy();
+          if (!silent) showToast('CodeBuddy 后端管理接口未启用', 'info');
+          return;
+        }
+        if (statusRes && statusRes.__error) throw statusRes.__error;
+        state.codebuddy.unsupported = false;
+        state.codebuddy.status = statusRes;
+        const accountsRes = await api('/codebuddy/accounts').catch((error) => ({ __error: error }));
+        if (accountsRes && accountsRes.__error) throw accountsRes.__error;
+        state.codebuddy.accounts = accountsRes;
+        await loadCodeBuddyModels();
+        renderCodeBuddy();
+      } catch (error) {
+        if (!silent) showToast('CodeBuddy 加载失败：' + error.message, 'error');
+      }
+    }
+    function buildCodeBuddyImportBody(mode) {
+      if (mode === 'batch') {
+        const raw = ($('cbImportBatchJson').value || '').trim();
+        if (!raw) throw new Error('请粘贴批量 JSON');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return { accounts: parsed };
+        if (parsed && Array.isArray(parsed.accounts)) return { accounts: parsed.accounts };
+        if (parsed && (parsed.authToken || parsed.apiKey || parsed.apiKeyHelper)) return { accounts: [parsed] };
+        throw new Error('批量 JSON 格式无效，需包含 accounts 数组或单个凭证对象');
+      }
+      const label = ($('cbImportLabel').value || '').trim();
+      const authToken = ($('cbImportAuthToken').value || '').trim();
+      const apiKey = ($('cbImportApiKey').value || '').trim();
+      const apiKeyHelper = ($('cbImportApiKeyHelper').value || '').trim();
+      const baseUrl = ($('cbImportBaseUrl').value || '').trim();
+      const internetEnvironment = ($('cbImportInternetEnv').value || '').trim();
+      if (!authToken && !apiKey && !apiKeyHelper) {
+        throw new Error('authToken / apiKey / apiKeyHelper 至少填写一项');
+      }
+      const account = { label: label || undefined };
+      if (authToken) account.authToken = authToken;
+      if (apiKey) account.apiKey = apiKey;
+      if (apiKeyHelper) account.apiKeyHelper = apiKeyHelper;
+      if (baseUrl) account.baseUrl = baseUrl;
+      if (internetEnvironment) account.internetEnvironment = internetEnvironment;
+      return { accounts: [account] };
+    }
+    async function importCodeBuddyAccounts(mode) {
+      const toastId = mode === 'batch' ? 'cbImportBatchToast' : 'cbImportToast';
+      const btnId = mode === 'batch' ? 'cbImportBatchBtn' : 'cbImportBtn';
+      setInlineToast(toastId, '// 正在导入账号...');
+      $(btnId).disabled = true;
+      try {
+        const body = buildCodeBuddyImportBody(mode);
+        const result = await api('/codebuddy/accounts/import', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (mode === 'batch') {
+          $('cbImportBatchJson').value = '';
+        } else {
+          ['cbImportLabel', 'cbImportAuthToken', 'cbImportApiKey', 'cbImportApiKeyHelper', 'cbImportBaseUrl', 'cbImportInternetEnv']
+            .forEach((id) => { const node = $(id); if (node) node.value = ''; });
+        }
+        const count = Array.isArray(result.imported) ? result.imported.length : 0;
+        setInlineToast(toastId, '✓ 导入成功，共 ' + count + ' 个账号。');
+        showToast('CodeBuddy 账号导入成功 · ' + count + ' 个', 'success');
+        await refreshCodeBuddy(true);
+      } catch (error) {
+        const message = error instanceof SyntaxError ? 'JSON 格式无效，请检查后重试' : error.message;
+        setInlineToast(toastId, '✗ 导入失败：' + message);
+        showToast('CodeBuddy 导入失败：' + message, 'error');
+      } finally {
+        $(btnId).disabled = state.busy;
+      }
+    }
+    async function codeBuddyAccountAction(accountId, action) {
+      const accounts = (state.codebuddy.accounts && Array.isArray(state.codebuddy.accounts.accounts))
+        ? state.codebuddy.accounts.accounts : [];
+      const account = accounts.find((item) => item.id === accountId);
+      if (action === 'delete') {
+        const name = account ? codeBuddyAccountLabel(account) : accountId;
+        if (!confirm('确认删除 CodeBuddy 账号「' + name + '」吗？此操作不可恢复。')) return;
+        await api('/codebuddy/accounts/' + encodeURIComponent(accountId), { method: 'DELETE' });
+        showToast('CodeBuddy 账号已删除', 'success');
+        await refreshCodeBuddy(true);
+        return;
+      }
+      if (action === 'enable' || action === 'disable') {
+        await api('/codebuddy/accounts/' + encodeURIComponent(accountId) + '/' + action, { method: 'POST' });
+        showToast(action === 'enable' ? 'CodeBuddy 账号已启用' : 'CodeBuddy 账号已禁用', 'success');
+        await refreshCodeBuddy(true);
+        return;
+      }
+      if (action === 'probe') {
+        const select = $('cbProbeAccount');
+        if (select) select.value = accountId;
+        await runCodeBuddyProbe();
+      }
+    }
+    function renderCodeBuddyProbeResult(lines, variant) {
+      const box = $('cbProbeBox');
+      if (!box) return;
+      box.classList.remove('ok', 'fail');
+      if (variant) box.classList.add(variant);
+      box.innerHTML = lines.map((line) => '<div class="probe-line">' + line + '</div>').join('');
+    }
+    async function runCodeBuddyProbe() {
+      const model = ($('cbProbeModel').value || '').trim() || 'codebuddy/default';
+      const accountId = ($('cbProbeAccount').value || '').trim();
+      renderCodeBuddyProbeResult(['<strong>状态</strong> 正在请求 ' + escapeHtml(model) + '...'], '');
+      $('cbProbeBtn').disabled = true;
+      try {
+        const body = { model };
+        if (accountId) body.accountId = accountId;
+        const result = await api('/codebuddy/probe', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const used = result.account ? codeBuddyAccountLabel(result.account) : (accountId || '自动轮询');
+        renderCodeBuddyProbeResult([
+          '<strong>模型</strong> ' + escapeHtml(result.model || model),
+          '<strong>账号</strong> ' + escapeHtml(used),
+          '<strong>耗时</strong> ' + escapeHtml(fmtMs(result.durationMs)),
+          '<strong>输出</strong> ' + escapeHtml(result.text || '-'),
+        ], 'ok');
+        showToast('CodeBuddy 探针完成 · ' + fmtMs(result.durationMs), 'success');
+        await refreshCodeBuddy(true);
+      } catch (error) {
+        renderCodeBuddyProbeResult([
+          '<strong>状态</strong> 失败',
+          '<strong>错误</strong> ' + escapeHtml(error.message),
+        ], 'fail');
+        showToast('CodeBuddy 探针失败：' + error.message, 'error');
+      } finally {
+        $('cbProbeBtn').disabled = state.busy;
+      }
     }
     async function refreshAll(silent) {
       setBusy(true);
@@ -531,7 +1079,11 @@ export function buildDirectAdminHtml() {
           localStorage.removeItem('cursor_direct_admin_remember');
         }
         setLoginVisible(false);
+        const initialHash = (location.hash || '').replace('#', '');
+        const initialView = (initialHash === 'codebuddy') ? 'codebuddy' : 'cursor';
+        setActiveView(initialView, { skipRefresh: true, skipHash: !initialHash });
         await refreshAll(true);
+        if (initialView === 'codebuddy') await refreshCodeBuddy(true);
         setInlineToast('loginStatus', '');
         showToast('已进入控制台', 'success');
       } catch (error) {
@@ -768,6 +1320,39 @@ export function buildDirectAdminHtml() {
       accountAction(button.getAttribute('data-id'), button.getAttribute('data-action')).catch((error) => {
         showToast('操作失败：' + error.message, 'error');
       });
+    });
+    const cbImportTabs = $('codebuddyImportTabs');
+    if (cbImportTabs) {
+      cbImportTabs.addEventListener('click', (event) => {
+        const btn = event.target.closest('button[data-cb-tab]');
+        if (btn) setCodeBuddyImportMode(btn.getAttribute('data-cb-tab'));
+      });
+    }
+    const cbRefreshBtn = $('codebuddyRefreshBtn');
+    if (cbRefreshBtn) cbRefreshBtn.addEventListener('click', () => refreshCodeBuddy(false).then(() => showToast('CodeBuddy 已刷新', 'success')).catch((error) => showToast('刷新失败：' + error.message, 'error')));
+    const cbImportBtn = $('cbImportBtn');
+    if (cbImportBtn) cbImportBtn.addEventListener('click', () => importCodeBuddyAccounts('single'));
+    const cbImportBatchBtn = $('cbImportBatchBtn');
+    if (cbImportBatchBtn) cbImportBatchBtn.addEventListener('click', () => importCodeBuddyAccounts('batch'));
+    const cbProbeBtn = $('cbProbeBtn');
+    if (cbProbeBtn) cbProbeBtn.addEventListener('click', runCodeBuddyProbe);
+    const cbAccountRows = $('codebuddyAccountRows');
+    if (cbAccountRows) {
+      cbAccountRows.addEventListener('click', (event) => {
+        const button = event.target.closest('button[data-cb-action]');
+        if (!button) return;
+        codeBuddyAccountAction(button.getAttribute('data-id'), button.getAttribute('data-cb-action')).catch((error) => {
+          showToast('CodeBuddy 操作失败：' + error.message, 'error');
+        });
+      });
+    }
+
+    window.addEventListener('hashchange', () => {
+      const hash = (location.hash || '').replace('#', '');
+      const view = (hash === 'codebuddy') ? 'codebuddy' : 'cursor';
+      if (view !== state.activeView) {
+        setActiveView(view, { skipHash: true });
+      }
     });
 
     requestAnimationFrame(() => kickoffMotion($('loginView')));
