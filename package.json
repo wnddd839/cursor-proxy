@@ -8,8 +8,8 @@
     "start:direct": "node ./cursor-direct-gateway.mjs",
     "start:cli": "node ./cursor-gateway.mjs",
     "gateway": "node ./cursor-gateway.mjs",
-    "check": "node --check admin-shared.mjs && node --check direct-admin-page.mjs && node --check cursor-direct-gateway.mjs && node --check cursor-gateway.mjs && node --check provider-events.mjs && node --check codebuddy-provider.mjs && node --check codebuddy-account-pool.mjs",
-    "test": "node --test tests/unit/cursor-direct-gateway.test.mjs tests/unit/cursor-gateway-admin.test.mjs tests/unit/codebuddy-account-pool.test.mjs tests/unit/codebuddy-provider.test.mjs"
+    "check": "node --check admin-shared.mjs && node --check direct-admin-page.mjs && node --check cursor-direct-gateway.mjs && node --check cursor-gateway.mjs && node --check provider-events.mjs && node --check codebuddy-provider.mjs && node --check codebuddy-account-pool.mjs && node --check codebuddy-oauth.mjs",
+    "test": "node --test tests/unit/cursor-direct-gateway.test.mjs tests/unit/cursor-gateway-admin.test.mjs tests/unit/codebuddy-account-pool.test.mjs tests/unit/codebuddy-provider.test.mjs tests/unit/codebuddy-oauth.test.mjs"
   },
   "engines": {
     "node": ">=20"

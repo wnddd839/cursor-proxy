@@ -34,8 +34,23 @@ import {
   summarizeCodeBuddyAccountsStore,
   writeCodeBuddyAccountsStore,
 } from "./codebuddy-account-pool.mjs";
+import {
+  buildCodeBuddyOAuthAccountFromTokenData,
+  pollCodeBuddyPluginAuth,
+  startCodeBuddyPluginAuth,
+} from "./codebuddy-oauth.mjs";
 
 const DEFAULT_AUTH_PATH = path.join(homedir(), ".config", "cursor", "auth.json");
+const DEFAULT_CODEBUDDY_MODELS = [
+  "codebuddy/auto",
+  "codebuddy/deepseek-v3-2-volc",
+  "codebuddy/glm-4.7",
+  "codebuddy/glm-4.6",
+  "codebuddy/deepseek-v3.1",
+  "codebuddy/deepseek-v3-0324",
+  "codebuddy/hunyuan-chat",
+].join(",");
+const DEFAULT_CODEBUDDY_CHAT_COMPLETIONS_PATH = "/v2/chat/completions";
 const DEFAULT_DIRECT_PARSE_LIMITS = {
   maxDepth: 8,
   maxFields: 6000,
@@ -45,6 +60,27 @@ const DEFAULT_DIRECT_PARSE_LIMITS = {
   maxFrameBytes: 4 * 1024 * 1024,
   maxTotalBytes: 8 * 1024 * 1024,
 };
+
+function firstEnvValue(...keys) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function resolveDefaultCodeBuddyBaseUrl() {
+  const site = firstEnvValue("CURSOR_DIRECT_CODEBUDDY_SITE", "CODEBUDDY_SITE").toLowerCase();
+  const internetEnvironment = firstEnvValue(
+    "CURSOR_DIRECT_CODEBUDDY_INTERNET_ENVIRONMENT",
+    "CODEBUDDY_INTERNET_ENVIRONMENT",
+  ).toLowerCase();
+  if (["internal", "ioa"].includes(internetEnvironment)) return "https://copilot.tencent.com";
+  if (["domestic", "cn", "china"].includes(site) || ["domestic", "cn", "china"].includes(internetEnvironment)) {
+    return "https://www.codebuddy.cn";
+  }
+  return "https://www.codebuddy.ai";
+}
 
 const config = {
   host: process.env.CURSOR_DIRECT_HOST || "127.0.0.1",
@@ -71,8 +107,20 @@ const config = {
   codeBuddyBaseUrl:
     process.env.CURSOR_DIRECT_CODEBUDDY_BASE_URL ||
     process.env.CODEBUDDY_BASE_URL ||
-    "https://www.codebuddy.cn",
-  codeBuddyModels: process.env.CURSOR_DIRECT_CODEBUDDY_MODELS || "codebuddy/claude-sonnet-4.5,codebuddy/claude-opus-4.5,codebuddy/gpt-5.1",
+    resolveDefaultCodeBuddyBaseUrl(),
+  codeBuddyApiEndpoint:
+    process.env.CURSOR_DIRECT_CODEBUDDY_API_ENDPOINT ||
+    process.env.CODEBUDDY_API_ENDPOINT ||
+    "",
+  codeBuddyChatCompletionsPath:
+    process.env.CURSOR_DIRECT_CODEBUDDY_CHAT_COMPLETIONS_PATH ||
+    process.env.CODEBUDDY_CHAT_COMPLETIONS_PATH ||
+    DEFAULT_CODEBUDDY_CHAT_COMPLETIONS_PATH,
+  codeBuddyInternetEnvironment:
+    process.env.CURSOR_DIRECT_CODEBUDDY_INTERNET_ENVIRONMENT ||
+    process.env.CODEBUDDY_INTERNET_ENVIRONMENT ||
+    "",
+  codeBuddyModels: process.env.CURSOR_DIRECT_CODEBUDDY_MODELS || DEFAULT_CODEBUDDY_MODELS,
   apiBaseUrl: process.env.CURSOR_DIRECT_API_BASE_URL || "https://api2.cursor.sh",
   agentHost: process.env.CURSOR_DIRECT_AGENT_HOST || "agentn.api5.cursor.sh",
   clientVersion: process.env.CURSOR_DIRECT_CLIENT_VERSION || "cli-2026.05.24-dda726e",
@@ -317,7 +365,8 @@ function resolveGatewayProviderModel(model) {
   const cleaned = sanitizeModelName(model);
   const codeBuddyMatch = cleaned.match(/^codebuddy(?:(?:\/|:)(.*))?$/i);
   if (codeBuddyMatch) {
-    const upstreamModel = String(codeBuddyMatch[1] || "default").trim() || "default";
+    const requestedModel = String(codeBuddyMatch[1] || "auto").trim() || "auto";
+    const upstreamModel = requestedModel === "default" ? "auto" : requestedModel;
     return {
       provider: "codebuddy",
       model: upstreamModel,
@@ -334,14 +383,17 @@ function resolveGatewayProviderModel(model) {
 
 function normalizeCodeBuddyPublicModelId(model) {
   const cleaned = sanitizeModelName(model);
+  if (!cleaned || cleaned === "default" || cleaned === "auto") {
+    return "codebuddy/auto";
+  }
   if (/^codebuddy(?:\/|:|$)/i.test(cleaned)) {
     return resolveGatewayProviderModel(cleaned).publicModel;
   }
-  return `codebuddy/${cleaned || "default"}`;
+  return `codebuddy/${cleaned}`;
 }
 
 function listConfiguredCodeBuddyModels() {
-  const raw = String(config.codeBuddyModels || "codebuddy/default").trim();
+  const raw = String(config.codeBuddyModels || DEFAULT_CODEBUDDY_MODELS).trim();
   let rows = [];
   if (raw.startsWith("[") || raw.startsWith("{")) {
     try {
@@ -371,9 +423,9 @@ function listConfiguredCodeBuddyModels() {
     }));
   }
   return rows.length > 0 ? rows : [{
-    id: "codebuddy/default",
+    id: "codebuddy/auto",
     object: "model",
-    name: "codebuddy/default",
+    name: "codebuddy/auto",
     owned_by: "codebuddy",
     supportsTools: true,
     supportsImages: false,
@@ -471,6 +523,8 @@ function createCodeBuddyOAuthSessionState() {
     token: "",
     provider: "codebuddy",
     status: "idle",
+    site: "global",
+    authState: "",
     url: "",
     launchUrl: "",
     accessUrl: "",
@@ -860,8 +914,14 @@ async function runCodeBuddyCompletionFromPool(messages = [], options = {}) {
   try {
     const result = await runCodeBuddyCompletion(messages, {
       baseUrl: selection.account.baseUrl || config.codeBuddyBaseUrl,
+      apiEndpoint: selection.account.apiEndpoint || config.codeBuddyApiEndpoint,
+      chatCompletionsPath: selection.account.chatCompletionsPath || config.codeBuddyChatCompletionsPath,
+      token: selection.account.bearerToken || selection.account.apiKey,
+      bearerToken: selection.account.bearerToken,
+      apiKey: selection.account.apiKey,
       headers,
       model: options.model,
+      stream: options.stream !== false,
       tools: options.tools,
       toolChoice: options.toolChoice,
       signal: options.signal,
@@ -1169,6 +1229,13 @@ function firstCodeBuddyCredentialText(...values) {
   return "";
 }
 
+function looksLikeStructuredCodeBuddyCredentialText(value) {
+  const text = compactText(value);
+  if (!text) return false;
+  if (/^[{[]/.test(text)) return true;
+  return /(?:^|\n|\s)(?:CODEBUDDY_API_KEY|API_KEY|api_key|apiKey|x-api-key|CODEBUDDY_SITE|site|CURSOR_DIRECT_CODEBUDDY_API_ENDPOINT|CODEBUDDY_API_ENDPOINT|apiEndpoint|api_endpoint)\s*[:=]/i.test(text);
+}
+
 function stripWrappedSecret(value) {
   return compactText(value).replace(/^['"]|['"]$/g, "");
 }
@@ -1188,6 +1255,9 @@ function parseCodeBuddyCredentialEnvText(text = {}) {
   const result = {
     apiKey: "",
     baseUrl: "",
+    apiEndpoint: "",
+    chatCompletionsPath: "",
+    internetEnvironment: "",
   };
   const read = (pattern) => {
     const match = raw.match(pattern);
@@ -1195,7 +1265,11 @@ function parseCodeBuddyCredentialEnvText(text = {}) {
   };
 
   result.apiKey = read(/(?:^|\n|\s)(?:CODEBUDDY_API_KEY|API_KEY|api_key|apiKey|x-api-key)\s*[:=]\s*["']?([^\s"',;]+)/i);
+  result.site = read(/(?:^|\n|\s)(?:CURSOR_DIRECT_CODEBUDDY_SITE|CODEBUDDY_SITE|site)\s*[:=]\s*["']?([^\s"',;]+)/i);
   result.baseUrl = read(/(?:^|\n|\s)(?:CODEBUDDY_BASE_URL|baseUrl|base_url)\s*[:=]\s*["']?([^\s"',;]+)/i);
+  result.apiEndpoint = read(/(?:^|\n|\s)(?:CURSOR_DIRECT_CODEBUDDY_API_ENDPOINT|CODEBUDDY_API_ENDPOINT|apiEndpoint|api_endpoint)\s*[:=]\s*["']?([^\s"',;]+)/i);
+  result.chatCompletionsPath = read(/(?:^|\n|\s)(?:CURSOR_DIRECT_CODEBUDDY_CHAT_COMPLETIONS_PATH|CODEBUDDY_CHAT_COMPLETIONS_PATH|chatCompletionsPath|chat_completions_path|endpointPath|endpoint_path)\s*[:=]\s*["']?([^\s"',;]+)/i);
+  result.internetEnvironment = read(/(?:^|\n|\s)(?:CURSOR_DIRECT_CODEBUDDY_INTERNET_ENVIRONMENT|CODEBUDDY_INTERNET_ENVIRONMENT|internetEnvironment|internet_environment)\s*[:=]\s*["']?([^\s"',;]+)/i);
 
   const apiHeader = raw.match(/(?:x-api-key|X-API-Key)\s*[:=]\s*["']?([^\s"',;]+)/);
   if (!result.apiKey && apiHeader) result.apiKey = stripWrappedSecret(apiHeader[1]);
@@ -1228,6 +1302,12 @@ function collectCodeBuddyCredentialFields(value, out = {}, seen = new Set()) {
         out.apiKey ||= text;
       } else if (["baseurl"].includes(normalizedKey) && shouldUseCodeBuddyCredentialBaseUrl(text)) {
         out.baseUrl ||= text;
+      } else if (["apiendpoint", "codebuddyapiendpoint", "chatendpoint", "endpoint"].includes(normalizedKey)) {
+        out.apiEndpoint ||= text;
+      } else if (["chatcompletionspath", "codebuddychatcompletionspath", "endpointpath"].includes(normalizedKey)) {
+        out.chatCompletionsPath ||= text;
+      } else if (["internetenvironment", "codebuddyinternetenvironment"].includes(normalizedKey)) {
+        out.internetEnvironment ||= text;
       } else if (["site", "region", "codebuddysite", "codebuddyregion"].includes(normalizedKey)) {
         out.site ||= text;
       } else if (["weborigin", "weburl", "origin", "url"].includes(normalizedKey)) {
@@ -1258,11 +1338,21 @@ function createCodeBuddyAccountFromCredential(input = {}, options = {}) {
   const source = input && typeof input === "object" ? input : {};
   const site = normalizeCodeBuddyImportSite(source.site || source.codeBuddySite || source.codebuddy_site || options.site);
   const baseUrl = normalizeCodeBuddyBaseUrl(source.baseUrl || options.baseUrl || getCodeBuddyImportBaseUrl(site) || config.codeBuddyBaseUrl);
+  const apiEndpoint = compactText(source.apiEndpoint || source.api_endpoint || source.endpoint || options.apiEndpoint || "");
+  const chatCompletionsPath = compactText(
+    source.chatCompletionsPath || source.chat_completions_path || source.endpointPath || source.endpoint_path || options.chatCompletionsPath || "",
+  );
+  const internetEnvironment = compactText(
+    source.internetEnvironment || source.internet_environment || options.internetEnvironment || "",
+  );
   const apiKey = compactText(source.apiKey || "");
   const account = {
     label: compactText(source.label || options.label || "CodeBuddy Account"),
     site,
     baseUrl: baseUrl,
+    apiEndpoint,
+    chatCompletionsPath,
+    internetEnvironment,
     source: "manual",
     apiKey,
   };
@@ -1280,6 +1370,9 @@ function normalizeCodeBuddyCredentialImportRequest(body = {}) {
   const label = compactText(source.label || source.accountLabel || "CodeBuddy Account");
   const site = normalizeCodeBuddyImportSite(source.site || source.codeBuddySite || source.codebuddy_site);
   const baseUrl = normalizeCodeBuddyBaseUrl(source.baseUrl || getCodeBuddyImportBaseUrl(site) || config.codeBuddyBaseUrl);
+  const apiEndpoint = compactText(source.apiEndpoint || source.api_endpoint || source.endpoint || "");
+  const chatCompletionsPath = compactText(source.chatCompletionsPath || source.chat_completions_path || source.endpointPath || source.endpoint_path || "");
+  const internetEnvironment = compactText(source.internetEnvironment || source.internet_environment || "");
   const text = firstCodeBuddyCredentialText(
     source.credentialText,
     source.credential,
@@ -1289,14 +1382,23 @@ function normalizeCodeBuddyCredentialImportRequest(body = {}) {
     source.token,
     source.apiKey,
   );
+  const textLooksStructured = looksLikeStructuredCodeBuddyCredentialText(text);
   const accounts = [];
   const add = (candidate) => {
-    const account = createCodeBuddyAccountFromCredential(candidate, { label, site, baseUrl });
+    const account = createCodeBuddyAccountFromCredential(candidate, {
+      label,
+      site,
+      baseUrl,
+      apiEndpoint,
+      chatCompletionsPath,
+      internetEnvironment,
+    });
     if (account) accounts.push(account);
   };
 
-  const apiKeyCandidate = compactText(source.apiKey || source.api_key || source["x-api-key"] || source.key || "");
-  if (apiKeyCandidate) add({ label, site, baseUrl, apiKey: apiKeyCandidate });
+  const rawApiKeyCandidate = compactText(source.apiKey || source.api_key || source["x-api-key"] || source.key || "");
+  const apiKeyCandidate = looksLikeStructuredCodeBuddyCredentialText(rawApiKeyCandidate) ? "" : rawApiKeyCandidate;
+  if (apiKeyCandidate) add({ label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment, apiKey: apiKeyCandidate });
 
   if (text) {
     let parsedJson = null;
@@ -1307,22 +1409,24 @@ function normalizeCodeBuddyCredentialImportRequest(body = {}) {
     }
     if (parsedJson) {
       if (Array.isArray(parsedJson)) {
-        for (const item of parsedJson) add(collectCodeBuddyCredentialFields(item, { label, site, baseUrl }));
+        for (const item of parsedJson) add(collectCodeBuddyCredentialFields(item, { label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment }));
       } else if (Array.isArray(parsedJson.accounts)) {
-        for (const item of parsedJson.accounts) add(collectCodeBuddyCredentialFields(item, { label, site, baseUrl }));
+        for (const item of parsedJson.accounts) add(collectCodeBuddyCredentialFields(item, { label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment }));
       } else {
-        add(collectCodeBuddyCredentialFields(parsedJson, { label, site, baseUrl }));
+        add(collectCodeBuddyCredentialFields(parsedJson, { label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment }));
       }
     }
     const envFields = parseCodeBuddyCredentialEnvText(text);
-    add({ label, site, baseUrl, ...envFields });
-    if (!parsedJson) add({ label, site, baseUrl, apiKey: text });
+    add({ label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment, ...envFields });
+    if (!parsedJson && !textLooksStructured) {
+      add({ label, site, baseUrl, apiEndpoint, chatCompletionsPath, internetEnvironment, apiKey: text });
+    }
   }
 
   const unique = [];
   const seen = new Set();
   for (const account of accounts) {
-    const key = [account.apiKey, account.baseUrl].join("|");
+    const key = [account.apiKey, account.baseUrl, account.apiEndpoint, account.chatCompletionsPath].join("|");
     if (seen.has(key)) continue;
     seen.add(key);
     unique.push(account);
@@ -1362,7 +1466,10 @@ function buildCodeBuddyOAuthSessionResponse(options = {}) {
     authStatus: codeBuddyOAuthSession.authStatus,
     login,
     label: codeBuddyOAuthSession.label,
-    running: false,
+    site: codeBuddyOAuthSession.site || "global",
+    authState: codeBuddyOAuthSession.authState || "",
+    externalAuthUrl: sessionUrl,
+    running: codeBuddyOAuthSession.status === "waiting",
     authenticated: Boolean(options.authenticated ?? (codeBuddyOAuthSession.status === "complete")),
   };
 }
@@ -1499,19 +1606,13 @@ async function getCodeBuddyOAuthSessionPayload(options = {}) {
       },
     };
   }
-  try {
-    const authStatus = await fetchCodeBuddyAuthStatus({ cookieHeader: options.cookieHeader || "" });
-    codeBuddyOAuthSession.authStatus = authStatus;
-  } catch (error) {
-    codeBuddyOAuthSession.error = error instanceof Error ? error.message : String(error);
-  }
   const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
   const payload = {
     ok: true,
     provider: "codebuddy",
     session: buildCodeBuddyOAuthSessionResponse({
       publicOrigin: options.publicOrigin,
-      authenticated: Boolean(codeBuddyOAuthSession.status === "complete" || codeBuddyOAuthSession.authStatus?.authenticated),
+      authenticated: Boolean(accounts.primary?.hasCredentials),
     }),
     accounts,
     account: accounts.primary,
@@ -1519,18 +1620,106 @@ async function getCodeBuddyOAuthSessionPayload(options = {}) {
   return setMetadataCache(metadataCaches.codeBuddyOAuthSession, payload, { now, ttlMs: config.oauthSessionCacheTtlMs });
 }
 
+function importCodeBuddyOAuthAccount(tokenData = {}, options = {}) {
+  const accountInput = buildCodeBuddyOAuthAccountFromTokenData(tokenData, {
+    label: options.label || codeBuddyOAuthSession.label,
+    site: options.site || codeBuddyOAuthSession.site || "global",
+  });
+  const result = importCodeBuddyAccounts(readCodeBuddyStore(), accountInput, {
+    accountsPath: config.codeBuddyAccountsPath,
+  });
+  const store = writeCodeBuddyStore(result.store);
+  return {
+    imported: result.imported,
+    summaries: result.summaries,
+    account: summarizeCodeBuddyAccount(result.imported[0] || accountInput),
+    accounts: summarizeCodeBuddyStore(store),
+  };
+}
+
+async function pollCodeBuddyOAuthSession(options = {}) {
+  const authState = compactText(options.authState || codeBuddyOAuthSession.authState);
+  if (!authState) {
+    return {
+      ok: false,
+      provider: "codebuddy",
+      status: "error",
+      message: "OAuth session has no auth state; click start login again.",
+      session: buildCodeBuddyOAuthSessionResponse({ publicOrigin: options.publicOrigin }),
+    };
+  }
+  const poll = await pollCodeBuddyPluginAuth({
+    authState,
+    site: options.site || codeBuddyOAuthSession.site || "global",
+    baseUrl: options.baseUrl,
+  });
+  if (poll.status === "pending") {
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.error = "";
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+    return {
+      ok: false,
+      pending: true,
+      provider: "codebuddy",
+      status: "pending",
+      message: poll.message || "waiting for login",
+      session: buildCodeBuddyOAuthSessionResponse({ publicOrigin: options.publicOrigin }),
+      accounts,
+      account: accounts.primary,
+    };
+  }
+  if (poll.status !== "success" || !poll.tokenData) {
+    codeBuddyOAuthSession.status = "failed";
+    codeBuddyOAuthSession.error = poll.message || "CodeBuddy OAuth poll failed";
+    codeBuddyOAuthSession.updatedAt = Date.now();
+    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+    return {
+      ok: false,
+      provider: "codebuddy",
+      status: poll.status || "error",
+      message: codeBuddyOAuthSession.error,
+      session: buildCodeBuddyOAuthSessionResponse({ publicOrigin: options.publicOrigin }),
+      accounts,
+      account: accounts.primary,
+    };
+  }
+  const imported = importCodeBuddyOAuthAccount(poll.tokenData, options);
+  codeBuddyOAuthSession.status = "complete";
+  codeBuddyOAuthSession.completedAt = Date.now();
+  codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.completedAt;
+  codeBuddyOAuthSession.error = "";
+  codeBuddyOAuthSession.authStatus = imported.account?.authStatus || null;
+  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+  return {
+    ok: true,
+    provider: "codebuddy",
+    status: "complete",
+    message: "CodeBuddy OAuth login completed and account imported.",
+    session: buildCodeBuddyOAuthSessionResponse({
+      publicOrigin: options.publicOrigin,
+      authenticated: true,
+    }),
+    imported: imported.summaries,
+    account: imported.account,
+    accounts: imported.accounts,
+  };
+}
+
 async function startCodeBuddyOAuthSession(options = {}) {
-  if ((codeBuddyOAuthSession.status === "starting" || codeBuddyOAuthSession.status === "waiting" || codeBuddyOAuthSession.status === "unsupported") &&
-    isCodeBuddyOAuthSessionActive(codeBuddyOAuthSession)) {
+  if (codeBuddyOAuthSession.status === "waiting" && isCodeBuddyOAuthSessionActive(codeBuddyOAuthSession)) {
     return getCodeBuddyOAuthSessionPayload({ fresh: true, publicOrigin: options.publicOrigin });
   }
   codeBuddyOAuthSession = createCodeBuddyOAuthSessionState();
   codeBuddyOAuthSession.id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   codeBuddyOAuthSession.token = randomUUID();
-  codeBuddyOAuthSession.status = "unsupported";
+  codeBuddyOAuthSession.status = "starting";
+  codeBuddyOAuthSession.site = compactText(options.site || "global") || "global";
   codeBuddyOAuthSession.startedAt = Date.now();
   codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.startedAt;
-  codeBuddyOAuthSession.label = compactText(options.label || "CodeBuddy Gateway");
+  codeBuddyOAuthSession.label = compactText(options.label || "CodeBuddy OAuth");
   codeBuddyOAuthSession.launchUrl = buildCodeBuddyOAuthLaunchUrl({
     publicOrigin: options.publicOrigin,
     id: codeBuddyOAuthSession.id,
@@ -1542,15 +1731,29 @@ async function startCodeBuddyOAuthSession(options = {}) {
     id: codeBuddyOAuthSession.id,
     token: codeBuddyOAuthSession.token,
   });
-  codeBuddyOAuthSession.error = "CodeBuddy uses API Key import mode; paste a CodeBuddy API key into the admin panel.";
-  codeBuddyOAuthSession.login = {
-    success: false,
-    message: codeBuddyOAuthSession.error,
-    url: "",
-    externalUrl: "",
-  };
+  try {
+    const started = await startCodeBuddyPluginAuth({ site: codeBuddyOAuthSession.site });
+    codeBuddyOAuthSession.authState = started.authState;
+    codeBuddyOAuthSession.url = started.authUrl;
+    codeBuddyOAuthSession.status = "waiting";
+    codeBuddyOAuthSession.error = "";
+    codeBuddyOAuthSession.login = {
+      success: true,
+      message: "请在打开的 CodeBuddy 页面完成登录，然后回到管理台点击「检查登录」或等待自动轮询。",
+      url: started.authUrl,
+      externalUrl: started.authUrl,
+    };
+  } catch (error) {
+    codeBuddyOAuthSession.status = "failed";
+    codeBuddyOAuthSession.error = error instanceof Error ? error.message : String(error);
+    codeBuddyOAuthSession.login = {
+      success: false,
+      message: codeBuddyOAuthSession.error,
+      url: "",
+      externalUrl: "",
+    };
+  }
   clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-
   codeBuddyOAuthSession.updatedAt = Date.now();
   clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
   return getCodeBuddyOAuthSessionPayload({ fresh: true, publicOrigin: options.publicOrigin });
@@ -1558,115 +1761,33 @@ async function startCodeBuddyOAuthSession(options = {}) {
 
 async function completeCodeBuddyGatewayAuth(callbackUrl = "", options = {}) {
   const rawCallbackUrl = String(callbackUrl || "").trim();
-  const tokenCallback = rawCallbackUrl
-    ? parseCodeBuddyOAuthCallbackUrl(rawCallbackUrl, codeBuddyOAuthSession)
-    : { ok: false, reason: "empty callback url" };
-  const manualCallback = rawCallbackUrl && !tokenCallback.ok
-    ? parseCodeBuddyManualCallbackUrl(rawCallbackUrl)
-    : { ok: false, reason: "empty callback url" };
-  const gatewayCredential = parseCodeBuddyGatewayCredentialInput(rawCallbackUrl, {
-    cookieHeader: options.cookieHeader,
-    publicOrigin: options.publicOrigin,
-  });
-  const hasCredential = Boolean(gatewayCredential.authToken || gatewayCredential.cookie);
-  const callbackConfirmed = Boolean(rawCallbackUrl && (tokenCallback.ok || manualCallback.ok || gatewayCredential.ok));
-
-  if (rawCallbackUrl && !callbackConfirmed && !hasCredential) {
-    codeBuddyOAuthSession.status = codeBuddyOAuthSession.status === "complete" ? "complete" : "waiting";
-    codeBuddyOAuthSession.error = `CodeBuddy 登录结果无效：${manualCallback.reason || tokenCallback.reason}`;
-    codeBuddyOAuthSession.updatedAt = Date.now();
-    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
-    return {
-      ok: false,
-      provider: "codebuddy",
-      session: buildCodeBuddyOAuthSessionResponse({
-        publicOrigin: options.publicOrigin,
-        authenticated: codeBuddyOAuthSession.status === "complete",
-      }),
-      accounts,
-      account: accounts.primary,
-    };
-  }
-
-  if (callbackConfirmed) {
+  if (rawCallbackUrl) {
+    const tokenCallback = parseCodeBuddyOAuthCallbackUrl(rawCallbackUrl, codeBuddyOAuthSession);
+    const manualCallback = !tokenCallback.ok ? parseCodeBuddyManualCallbackUrl(rawCallbackUrl) : { ok: false };
+    const gatewayCredential = parseCodeBuddyGatewayCredentialInput(rawCallbackUrl, {
+      cookieHeader: options.cookieHeader,
+      publicOrigin: options.publicOrigin,
+    });
+    if (!(tokenCallback.ok || manualCallback.ok || gatewayCredential.ok || gatewayCredential.authToken)) {
+      codeBuddyOAuthSession.status = "waiting";
+      codeBuddyOAuthSession.error = `CodeBuddy 登录回调无效：${manualCallback.reason || tokenCallback.reason}`;
+      codeBuddyOAuthSession.updatedAt = Date.now();
+      clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
+      const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+      return {
+        ok: false,
+        provider: "codebuddy",
+        session: buildCodeBuddyOAuthSessionResponse({ publicOrigin: options.publicOrigin }),
+        accounts,
+        account: accounts.primary,
+      };
+    }
     codeBuddyOAuthSession.callbackUrl = rawCallbackUrl;
     codeBuddyOAuthSession.confirmedAt = Date.now();
     codeBuddyOAuthSession.updatedAt = codeBuddyOAuthSession.confirmedAt;
     clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
   }
-
-  let authStatus = null;
-  try {
-    authStatus = await fetchCodeBuddyAuthStatus({
-      credential: gatewayCredential,
-      cookieHeader: gatewayCredential.cookie || options.cookieHeader || "",
-      baseUrl: gatewayCredential.baseUrl || config.codeBuddyBaseUrl,
-    });
-  } catch (error) {
-    codeBuddyOAuthSession.status = "waiting";
-    codeBuddyOAuthSession.error = `CodeBuddy daemon 不可访问：${error instanceof Error ? error.message : String(error)}`;
-    codeBuddyOAuthSession.updatedAt = Date.now();
-    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
-    return {
-      ok: false,
-      provider: "codebuddy",
-      session: buildCodeBuddyOAuthSessionResponse({
-        publicOrigin: options.publicOrigin,
-        authenticated: false,
-      }),
-      accounts,
-      account: accounts.primary,
-    };
-  }
-
-  codeBuddyOAuthSession.authStatus = authStatus;
-  const canImportDaemon = false;
-  const canImportCredential = hasCredential && (authStatus.authenticated || authStatus.accessAllowed);
-  if (!canImportDaemon && !canImportCredential) {
-    codeBuddyOAuthSession.status = "waiting";
-    codeBuddyOAuthSession.error = hasCredential
-      ? "CodeBuddy token/cookie 未通过 auth/status 校验，请确认粘贴的是 Gateway 登录链接或 password token。"
-      : "尚未检测到 CodeBuddy Web 登录态；请打开 Web UI 登录后重试，或粘贴带 password 的 Gateway 链接 / token。";
-    codeBuddyOAuthSession.updatedAt = Date.now();
-    clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-    const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
-    return {
-      ok: false,
-      provider: "codebuddy",
-      session: buildCodeBuddyOAuthSessionResponse({
-        publicOrigin: options.publicOrigin,
-        authenticated: false,
-      }),
-      accounts,
-      account: accounts.primary,
-    };
-  }
-
-  const shouldStoreCredential = authStatus.authEnabled !== false && canImportCredential;
-  const imported = importCodeBuddyGatewayAccount(authStatus, {
-    label: codeBuddyOAuthSession.label || "CodeBuddy Gateway",
-    baseUrl: gatewayCredential.baseUrl || config.codeBuddyBaseUrl,
-    authToken: shouldStoreCredential ? gatewayCredential.authToken : "",
-    cookie: shouldStoreCredential && !gatewayCredential.authToken ? gatewayCredential.cookie : "",
-    confirmed: true,
-  });
-  codeBuddyOAuthSession.status = "complete";
-  codeBuddyOAuthSession.completedAt = Date.now();
-  codeBuddyOAuthSession.error = "";
-  codeBuddyOAuthSession.updatedAt = Date.now();
-  clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
-  return {
-    ok: true,
-    provider: "codebuddy",
-    session: buildCodeBuddyOAuthSessionResponse({
-      publicOrigin: options.publicOrigin,
-      authenticated: true,
-    }),
-    accounts: imported.accounts,
-    account: imported.account,
-  };
+  return pollCodeBuddyOAuthSession(options);
 }
 
 async function waitForCodeBuddyOAuthCompletion(callbackUrl = "", options = {}) {
@@ -4165,19 +4286,28 @@ async function handleCodeBuddyOAuthLaunch(req, res, url) {
   }
 
   try {
-    codeBuddyOAuthSession.status = "unsupported";
     codeBuddyOAuthSession.launchUrl ||= buildCodeBuddyOAuthLaunchUrl({ publicOrigin, id, token });
     codeBuddyOAuthSession.accessUrl = buildCodeBuddyRemoteUrl({ publicOrigin });
     codeBuddyOAuthSession.callbackUrl ||= buildCodeBuddyOAuthCallbackUrl({ publicOrigin, id, token });
-    codeBuddyOAuthSession.error = "CodeBuddy uses API Key import mode; paste a CodeBuddy API key into the admin panel.";
     codeBuddyOAuthSession.updatedAt = Date.now();
     clearMetadataCache(metadataCaches.codeBuddyOAuthSession);
 
+    const authUrl = compactText(codeBuddyOAuthSession.url || codeBuddyOAuthSession.login?.url || "");
+    if (authUrl && codeBuddyOAuthSession.status === "waiting") {
+      res.writeHead(302, {
+        location: authUrl,
+        "set-cookie": setCookie,
+        "cache-control": "no-store",
+      });
+      res.end();
+      return;
+    }
+
     const response = buildCodeBuddyOAuthLaunchPage(
-      "CodeBuddy 当前使用 API Key 导入模式。请回到管理台，粘贴 API Key 导入账号池。",
+      codeBuddyOAuthSession.error || "请回到管理台重新发起 CodeBuddy OAuth 登录。",
       { publicOrigin },
     );
-    res.writeHead(409, {
+    res.writeHead(codeBuddyOAuthSession.status === "failed" ? 500 : 409, {
       ...response.headers,
       "set-cookie": setCookie,
       "cache-control": "no-store",
@@ -4222,6 +4352,9 @@ function getStatusPayload() {
     codeBuddy: {
       accountsPath: config.codeBuddyAccountsPath,
       baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      apiEndpoint: String(config.codeBuddyApiEndpoint || ""),
+      chatCompletionsPath: String(config.codeBuddyChatCompletionsPath || DEFAULT_CODEBUDDY_CHAT_COMPLETIONS_PATH),
+      internetEnvironment: String(config.codeBuddyInternetEnvironment || ""),
       models: listConfiguredCodeBuddyModels().map((model) => model.id),
     },
     agentHost: config.agentHost,
@@ -4252,6 +4385,9 @@ function buildDirectAdminStatusPayload(options = {}) {
     codeBuddy: {
       accountsPath: config.codeBuddyAccountsPath,
       baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      apiEndpoint: String(config.codeBuddyApiEndpoint || ""),
+      chatCompletionsPath: String(config.codeBuddyChatCompletionsPath || DEFAULT_CODEBUDDY_CHAT_COMPLETIONS_PATH),
+      internetEnvironment: String(config.codeBuddyInternetEnvironment || ""),
       models: listConfiguredCodeBuddyModels().map((model) => model.id),
     },
     memory: getMemorySnapshot(),
@@ -4262,6 +4398,9 @@ function buildDirectAdminStatusPayload(options = {}) {
       accountsPath: config.accountsPath,
       codeBuddyAccountsPath: config.codeBuddyAccountsPath,
       codeBuddyBaseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
+      codeBuddyApiEndpoint: config.codeBuddyApiEndpoint,
+      codeBuddyChatCompletionsPath: config.codeBuddyChatCompletionsPath,
+      codeBuddyInternetEnvironment: config.codeBuddyInternetEnvironment,
       codeBuddyModels: config.codeBuddyModels,
       agentHost: config.agentHost,
       clientVersion: config.clientVersion,
@@ -4383,16 +4522,21 @@ async function handle(req, res) {
 
     if (routePath === "/direct-admin/api/codebuddy/status" && req.method === "GET") {
       try {
-        const authStatus = await fetchCodeBuddyAuthStatus({
-          cookieHeader: req.headers.cookie || "",
-        }).catch(() => null);
+        const accounts = summarizeCodeBuddyStore(readCodeBuddyStore());
+        const chatEndpoint = config.codeBuddyApiEndpoint
+          || `${normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl)}${config.codeBuddyChatCompletionsPath}`;
         const response = json(200, {
           ok: true,
           provider: "codebuddy",
+          configured: Boolean(accounts.primary?.hasCredentials),
           baseUrl: normalizeCodeBuddyBaseUrl(config.codeBuddyBaseUrl),
-          accounts: summarizeCodeBuddyStore(readCodeBuddyStore()),
+          apiEndpoint: String(config.codeBuddyApiEndpoint || ""),
+          chatEndpoint,
+          chatCompletionsPath: String(config.codeBuddyChatCompletionsPath || DEFAULT_CODEBUDDY_CHAT_COMPLETIONS_PATH),
+          internetEnvironment: String(config.codeBuddyInternetEnvironment || ""),
+          accounts,
           models: listConfiguredCodeBuddyModels(),
-          authStatus,
+          modelsSource: "configured_aliases",
         });
         res.writeHead(response.status, response.headers);
         res.end(response.body);
@@ -4426,6 +4570,7 @@ async function handle(req, res) {
         const body = await readRequestBody(req).catch(() => ({}));
         const response = json(200, await startCodeBuddyOAuthSession({
           label: body?.label || "",
+          site: body?.site || "global",
           publicOrigin: getPublicOrigin(req),
         }));
         res.writeHead(response.status, response.headers);
@@ -4444,6 +4589,21 @@ async function handle(req, res) {
         const response = json(200, await waitForCodeBuddyOAuthCompletion(body?.callbackUrl || body?.url || "", {
           publicOrigin: getPublicOrigin(req),
           cookieHeader: req.headers.cookie || "",
+        }));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      } catch (error) {
+        const response = openAiError(500, "internal_error", error instanceof Error ? error.message : String(error));
+        res.writeHead(response.status, response.headers);
+        res.end(response.body);
+      }
+      return;
+    }
+
+    if (routePath === "/direct-admin/api/codebuddy/oauth/poll" && req.method === "POST") {
+      try {
+        const response = json(200, await pollCodeBuddyOAuthSession({
+          publicOrigin: getPublicOrigin(req),
         }));
         res.writeHead(response.status, response.headers);
         res.end(response.body);
@@ -4558,13 +4718,21 @@ async function handle(req, res) {
         return;
       }
 
-      const providerModel = resolveGatewayProviderModel(body?.model || "codebuddy/default");
+      const providerModel = resolveGatewayProviderModel(body?.model || "codebuddy/auto");
       const prompt = String(body?.prompt || "Reply with EXACTLY CODEBUDDY_DIRECT_OK and no other text.");
+      const probeMessages = [
+        {
+          role: "system",
+          content: "You are validating the CodeBuddy API key direct chat path. Reply only with the requested marker.",
+        },
+        { role: "user", content: prompt },
+      ];
       const started = Date.now();
       try {
-        const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
+        const result = await runCodeBuddyCompletionFromPool(probeMessages, {
           accountId: body?.accountId || "",
           model: providerModel.model,
+          stream: true,
         });
         const response = json(200, {
           ok: true,
@@ -4953,204 +5121,19 @@ async function handle(req, res) {
     const rawRequestedModel = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : "claude-sonnet-4-5";
     const providerModel = resolveGatewayProviderModel(rawRequestedModel);
     if (providerModel.provider === "codebuddy") {
-      const requestedModel = providerModel.publicModel;
-      const claudeToolOptions = { tools: body?.tools, toolChoice: body?.tool_choice };
-      const prompt = buildPromptFromClaudeMessages(messages, body?.system, claudeToolOptions);
-      const streamRequested = body?.stream === true;
-      const finishRequest = beginTrackedRequest(requestedModel, prompt.length, { stream: streamRequested });
-      log("info", "codebuddy claude messages request", {
+      log("info", "rejected codebuddy claude messages request", {
         model: providerModel.model,
-        requestedModel,
-        stream: streamRequested,
+        requestedModel: providerModel.publicModel,
+        stream: body?.stream === true,
         messages: messages.length,
-        promptChars: prompt.length,
         userAgent: String(req.headers["user-agent"] || "").slice(0, 120),
       });
-
-      if (streamRequested) {
-        const id = `msg_codebuddy_${Date.now()}`;
-        const controller = new AbortController();
-        let responseStarted = false;
-        let responseDone = false;
-        let textBlockStarted = false;
-        let textBlockStopped = false;
-        let streamedChars = 0;
-        let nextBlockIndex = 0;
-
-        const writeClaudeEvent = (event, payload) => {
-          res.write(createClaudeStreamEvent(event, payload));
-        };
-        const startMessage = () => {
-          if (responseStarted || res.destroyed) return;
-          responseStarted = true;
-          res.writeHead(200, {
-            "content-type": "text/event-stream; charset=utf-8",
-            "cache-control": "no-cache",
-            connection: "keep-alive",
-            "x-accel-buffering": "no",
-            "access-control-allow-origin": "*",
-          });
-          writeClaudeEvent("message_start", createClaudeMessageStreamEventsFromProviderTurn({ text: "", toolUses: [] }, {
-            id,
-            model: requestedModel,
-            prompt,
-          })[0].payload);
-          flushResponse(res);
-        };
-        const startTextBlock = () => {
-          startMessage();
-          if (textBlockStarted || res.destroyed) return;
-          textBlockStarted = true;
-          writeClaudeEvent("content_block_start", {
-            type: "content_block_start",
-            index: nextBlockIndex,
-            content_block: { type: "text", text: "" },
-          });
-          flushResponse(res);
-        };
-        const stopTextBlock = () => {
-          if (!textBlockStarted || textBlockStopped || res.destroyed) return;
-          textBlockStopped = true;
-          writeClaudeEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: nextBlockIndex,
-          });
-          nextBlockIndex += 1;
-        };
-        const writeToolUses = (toolUses) => {
-          for (const tool of toolUses) {
-            writeClaudeEvent("content_block_start", {
-              type: "content_block_start",
-              index: nextBlockIndex,
-              content_block: {
-                type: "tool_use",
-                id: tool.id,
-                name: tool.name || "tool",
-                input: {},
-              },
-            });
-            writeClaudeEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: nextBlockIndex,
-              delta: {
-                type: "input_json_delta",
-                partial_json: JSON.stringify(tool.input || {}),
-              },
-            });
-            writeClaudeEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: nextBlockIndex,
-            });
-            nextBlockIndex += 1;
-          }
-        };
-
-        const keepAliveMs = Math.max(0, Number(config.streamKeepAliveMs || 0));
-        const keepAliveTimer = keepAliveMs > 0
-          ? setInterval(() => {
-            if (!responseDone && responseStarted && !res.destroyed) {
-              writeClaudeEvent("ping", { type: "ping" });
-              flushResponse(res);
-            }
-          }, keepAliveMs)
-          : null;
-        const cancelOnClose = () => {
-          if (!responseDone) controller.abort();
-        };
-        res.on("close", cancelOnClose);
-
-        try {
-          startMessage();
-          const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
-            signal: controller.signal,
-            model: providerModel.model,
-            tools: body?.tools,
-            toolChoice: body?.tool_choice,
-            onDelta: (delta) => {
-              if (!delta || res.destroyed) return;
-              startTextBlock();
-              streamedChars += delta.length;
-              writeClaudeEvent("content_block_delta", {
-                type: "content_block_delta",
-                index: nextBlockIndex,
-                delta: { type: "text_delta", text: delta },
-              });
-              flushResponse(res);
-            },
-          });
-          if (keepAliveTimer) clearInterval(keepAliveTimer);
-          finishRequest(true, {
-            outputChars: result.turn.text.length,
-            upstreamBytes: result.bytes,
-            stringCount: result.eventCount,
-            deltaCount: result.deltaCount,
-          });
-          if (res.destroyed) return;
-          if (streamedChars === 0 && result.turn.text) {
-            startTextBlock();
-            streamedChars += result.turn.text.length;
-            writeClaudeEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: nextBlockIndex,
-              delta: { type: "text_delta", text: result.turn.text },
-            });
-          }
-          stopTextBlock();
-          const toolUses = Array.isArray(result.turn.toolUses) ? result.turn.toolUses : [];
-          if (toolUses.length > 0) writeToolUses(toolUses);
-          writeClaudeEvent("message_delta", {
-            type: "message_delta",
-            delta: { stop_reason: toolUses.length > 0 ? "tool_use" : "end_turn", stop_sequence: null },
-            usage: estimateClaudeUsage(prompt, result.turn.text),
-          });
-          writeClaudeEvent("message_stop", { type: "message_stop" });
-          responseDone = true;
-          res.end();
-        } catch (error) {
-          if (keepAliveTimer) clearInterval(keepAliveTimer);
-          const message = error instanceof Error ? error.message : String(error);
-          finishRequest(false, { error: message });
-          if (res.destroyed) return;
-          startMessage();
-          writeClaudeEvent("error", {
-            type: "error",
-            error: { type: "api_error", message },
-          });
-          responseDone = true;
-          res.end();
-        } finally {
-          if (keepAliveTimer) clearInterval(keepAliveTimer);
-          res.off("close", cancelOnClose);
-        }
-        return;
-      }
-
-      try {
-        const result = await runCodeBuddyCompletionFromPool([{ role: "user", content: prompt }], {
-          model: providerModel.model,
-          tools: body?.tools,
-          toolChoice: body?.tool_choice,
-        });
-        finishRequest(true, {
-          outputChars: result.turn.text.length,
-          upstreamBytes: result.bytes,
-          stringCount: result.eventCount,
-          deltaCount: result.deltaCount,
-        });
-        const response = json(200, createClaudeMessageFromProviderTurn(result.turn, {
-          id: `msg_codebuddy_${Date.now()}`,
-          model: requestedModel,
-          prompt,
-        }));
-        res.writeHead(response.status, response.headers);
-        res.end(response.body);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        finishRequest(false, { error: message });
-        const response = openAiError(502, "upstream_error", message);
-        res.writeHead(response.status, response.headers);
-        res.end(response.body);
-      }
+      const response = openAiError(400,
+        "invalid_request_error",
+        "CodeBuddy models are only available through /v1/chat/completions so gateway prompt shims never touch CodeBuddy requests.",
+      );
+      res.writeHead(response.status, response.headers);
+      res.end(response.body);
       return;
     }
     const requestedModel = normalizePublicModelName(rawRequestedModel);

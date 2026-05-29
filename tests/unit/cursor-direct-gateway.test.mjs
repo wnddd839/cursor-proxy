@@ -34,6 +34,7 @@ import {
   parseClaudeToolUse,
   pickAssistantCandidate,
   pickAssistantText,
+  resolveGatewayProviderModel,
   runDirectCompletionWithRetry,
   selectDirectAccount,
   setMetadataCache,
@@ -114,6 +115,24 @@ test("normalizeDirectModel maps public auto alias to Cursor default model id", (
   assert.equal(normalizeDirectModel("auto"), "default");
   assert.equal(normalizeDirectModel("cursor/auto"), "default");
   assert.equal(normalizeDirectModel("cursor-acp/composer-2-fast"), "composer-2-fast");
+});
+
+test("CodeBuddy default model resolves to official auto model", () => {
+  assert.deepEqual(resolveGatewayProviderModel("codebuddy/default"), {
+    provider: "codebuddy",
+    model: "auto",
+    publicModel: "codebuddy/auto",
+  });
+  assert.deepEqual(resolveGatewayProviderModel("codebuddy"), {
+    provider: "codebuddy",
+    model: "auto",
+    publicModel: "codebuddy/auto",
+  });
+  assert.deepEqual(resolveGatewayProviderModel("codebuddy/glm-4.7"), {
+    provider: "codebuddy",
+    model: "glm-4.7",
+    publicModel: "codebuddy/glm-4.7",
+  });
 });
 
 test("normalizeApiPath collapses duplicated Claude Code v1 prefixes", () => {
@@ -923,16 +942,67 @@ test("CodeBuddy apiKey import keeps the selected cloud site", () => {
   assert.equal(global.accounts[0].baseUrl, "https://www.codebuddy.ai");
 });
 
-test("CodeBuddy legacy OAuth helpers instruct apiKey import only", () => {
+test("CodeBuddy apiKey import accepts JSON and env text from the key field", () => {
+  const jsonImport = normalizeCodeBuddyCredentialImportRequest({
+    label: "JSON Key",
+    site: "domestic",
+    apiKey: '{"apiKey":"ck-json-secret","apiEndpoint":"https://copilot.tencent.com/v2/chat/completions"}',
+  });
+  assert.equal(jsonImport.accounts.length, 1);
+  assert.equal(jsonImport.accounts[0].apiKey, "ck-json-secret");
+  assert.equal(jsonImport.accounts[0].apiEndpoint, "https://copilot.tencent.com/v2/chat/completions");
+
+  const envImport = normalizeCodeBuddyCredentialImportRequest({
+    label: "Env Key",
+    site: "global",
+    apiKey: "CODEBUDDY_API_KEY=ck-env-secret CODEBUDDY_API_ENDPOINT=https://www.codebuddy.ai/v2/chat/completions",
+  });
+  assert.equal(envImport.accounts.length, 1);
+  assert.equal(envImport.accounts[0].apiKey, "ck-env-secret");
+  assert.equal(envImport.accounts[0].apiEndpoint, "https://www.codebuddy.ai/v2/chat/completions");
+});
+
+test("CodeBuddy admin probe uses streaming chat messages", () => {
+  const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
+  const probeRoute = source.match(/if \(routePath === "\/direct-admin\/api\/codebuddy\/probe"[^]*?const response = json\(200,/m)?.[0] || "";
+
+  assert.ok(probeRoute);
+  assert.match(probeRoute, /const probeMessages = \[/);
+  assert.match(probeRoute, /role: "system"/);
+  assert.match(probeRoute, /role: "user"/);
+  assert.match(probeRoute, /stream: true/);
+  assert.doesNotMatch(probeRoute, /runCodeBuddyCompletionFromPool\(\[\{ role: "user", content: prompt \}\]/);
+});
+
+test("CodeBuddy Claude messages route returns 400 instead of prompt shimming", () => {
+  const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
+  const routeStart = source.indexOf('if ((routePath === "/v1/messages" || routePath === "/messages") && req.method === "POST")');
+  const codeBuddyStart = source.indexOf('if (providerModel.provider === "codebuddy")', routeStart);
+  const directStart = source.indexOf("const requestedModel = normalizePublicModelName(rawRequestedModel);", codeBuddyStart);
+  const codeBuddyBranch = source.slice(codeBuddyStart, directStart);
+
+  assert.ok(routeStart > 0);
+  assert.ok(codeBuddyStart > routeStart);
+  assert.ok(directStart > codeBuddyStart);
+  assert.match(codeBuddyBranch, /openAiError\(400/);
+  assert.match(codeBuddyBranch, /\/v1\/chat\/completions/);
+  assert.doesNotMatch(codeBuddyBranch, /buildPromptFromClaudeMessages/);
+  assert.doesNotMatch(codeBuddyBranch, /CLAUDE_TOOL_USE_CONTRACT/);
+  assert.doesNotMatch(codeBuddyBranch, /runCodeBuddyCompletionFromPool/);
+});
+
+test("CodeBuddy OAuth uses plugin auth state and poll endpoints", () => {
   const source = readFileSync(new URL("../../cursor-direct-gateway.mjs", import.meta.url), "utf8");
   const startSource = source.match(/async function startCodeBuddyOAuthSession\([^]*?^}/m)?.[0] || "";
-  const launchSource = source.match(/async function handleCodeBuddyOAuthLaunch\([^]*?^}/m)?.[0] || "";
+  const pollSource = source.match(/async function pollCodeBuddyOAuthSession\([^]*?^}/m)?.[0] || "";
 
   assert.ok(startSource);
-  assert.ok(launchSource);
+  assert.ok(pollSource);
   assert.doesNotMatch(source, /@tencent-ai\/agent-sdk/);
-  assert.doesNotMatch(source, /unstable_v2_authenticate/);
-  assert.match(startSource, /API Key/);
-  assert.match(launchSource, /API Key/);
-  assert.doesNotMatch(startSource, /cookie|helper/i);
+  assert.match(startSource, /startCodeBuddyPluginAuth/);
+  assert.match(pollSource, /pollCodeBuddyPluginAuth/);
+  assert.match(pollSource, /importCodeBuddyOAuthAccount/);
+  assert.match(pollSource, /imported:\s*imported\.summaries/);
+  assert.doesNotMatch(pollSource, /imported:\s*imported\.imported/);
+  assert.match(source, /\/direct-admin\/api\/codebuddy\/oauth\/poll/);
 });

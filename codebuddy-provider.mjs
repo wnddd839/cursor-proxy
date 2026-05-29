@@ -131,29 +131,138 @@ function normalizeCodeBuddyModels(input = {}) {
     .filter((row) => !allowed || allowed.has(row.id));
 }
 
-function buildCodeBuddyPromptText(messages = []) {
-  return Array.isArray(messages)
-    ? messages
-      .map((message) => {
-        const role = String(message?.role || "user").toUpperCase();
-        const content = extractTextContent(message?.content).trim();
-        return content ? `${role}: ${content}` : "";
-      })
-      .filter(Boolean)
-      .join("\n\n")
-    : "";
+function normalizeOpenAiMessage(message = {}) {
+  const source = message && typeof message === "object" ? message : {};
+  const normalized = JSON.parse(JSON.stringify(source));
+  normalized.role = String(source?.role || "user").trim() || "user";
+  normalized.content = normalizeCodeBuddyMessageContent(source?.content);
+  return normalized;
 }
 
-function normalizeOpenAiMessage(message = {}) {
-  const role = String(message?.role || "user").trim() || "user";
-  const content = extractTextContent(message?.content).trim();
-  return { role, content };
+function normalizeCodeBuddyContentPart(part) {
+  if (typeof part === "string") return { type: "text", text: part };
+  if (!part || typeof part !== "object") return null;
+  if (typeof part.type === "string") {
+    const normalized = JSON.parse(JSON.stringify(part));
+    if (normalized.type === "text" && typeof normalized.text !== "string") {
+      normalized.text = extractTextContent(normalized.content ?? normalized.value ?? "");
+    }
+    return normalized;
+  }
+  const text = extractTextContent(part);
+  return text ? { type: "text", text } : null;
+}
+
+function normalizeCodeBuddyMessageContent(content) {
+  if (Array.isArray(content)) {
+    return content
+      .map(normalizeCodeBuddyContentPart)
+      .filter(Boolean);
+  }
+  const part = normalizeCodeBuddyContentPart(content);
+  return part ? [part] : [];
 }
 
 function normalizeOpenAiMessages(messages = []) {
   return (Array.isArray(messages) ? messages : [])
     .map(normalizeOpenAiMessage)
-    .filter((message) => message.content);
+    .filter((message) => (
+      (Array.isArray(message.content) && message.content.length > 0) ||
+      (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) ||
+      Boolean(message.tool_call_id || message.name)
+    ));
+}
+
+function flattenCodeBuddyCloudContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) {
+    const text = extractTextContent(content);
+    return text;
+  }
+  const hasStructured = content.some((part) => part && typeof part === "object" && part.type && part.type !== "text");
+  if (hasStructured) return content;
+  const text = content
+    .map((part) => (typeof part === "string" ? part : (part?.type === "text" ? String(part.text || "") : extractTextContent(part))))
+    .filter(Boolean)
+    .join("");
+  return text;
+}
+
+function formatCodeBuddyCloudMessage(message = {}) {
+  const role = String(message?.role || "user").trim() || "user";
+  const out = { role };
+  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+    out.tool_calls = message.tool_calls;
+  }
+  if (message.tool_call_id) out.tool_call_id = message.tool_call_id;
+  if (message.name) out.name = message.name;
+  const flat = flattenCodeBuddyCloudContent(message.content);
+  if (typeof flat === "string") {
+    out.content = flat;
+  } else if (flat != null) {
+    out.content = flat;
+  } else {
+    out.content = "";
+  }
+  return out;
+}
+
+export function ensureCodeBuddyUpstreamMessages(messages = []) {
+  const normalized = normalizeOpenAiMessages(messages).map(formatCodeBuddyCloudMessage);
+  return normalized;
+}
+
+function resolveCodeBuddyHost(baseUrl) {
+  try {
+    return new URL(normalizeBaseUrl(baseUrl)).host || "www.codebuddy.ai";
+  } catch {
+    return "www.codebuddy.ai";
+  }
+}
+
+/** Headers aligned with Sliverkiss/CodeBuddy2api cloud client (not local daemon). */
+export function buildCodeBuddyCloudHeaders(options = {}) {
+  const bearerToken = String(options.bearerToken || options.bearer_token || "").trim();
+  const apiKey = String(options.apiKey || "").trim();
+  const legacyToken = !bearerToken && !apiKey ? String(options.token || "").trim() : "";
+  const useApiKey = Boolean(
+    apiKey ||
+    (legacyToken && /^ck[_-]/i.test(legacyToken)),
+  );
+  const authToken = bearerToken || (useApiKey ? (apiKey || legacyToken) : legacyToken);
+  const domain = resolveCodeBuddyHost(options.baseUrl || "https://www.codebuddy.ai");
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json",
+    "x-requested-with": "XMLHttpRequest",
+    "x-stainless-arch": "x64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": process.platform === "win32" ? "Windows" : (process.platform === "darwin" ? "MacOS" : "Linux"),
+    "x-stainless-package-version": "5.10.1",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": process.version,
+    "x-conversation-id": String(options.conversationId || randomUUID()),
+    "x-conversation-request-id": String(options.conversationRequestId || randomUUID().replace(/-/g, "")),
+    "x-conversation-message-id": String(options.conversationMessageId || randomUUID().replace(/-/g, "")),
+    "x-request-id": String(options.requestId || randomUUID().replace(/-/g, "")),
+    "x-agent-intent": "craft",
+    "x-ide-type": "CLI",
+    "x-ide-name": "CLI",
+    "x-ide-version": "1.0.7",
+    "x-domain": domain,
+    "user-agent": "CLI/1.0.7 CodeBuddy/1.0.7",
+    "x-product": "SaaS",
+    "x-user-id": String(options.userId || "anonymous"),
+  };
+  if (authToken) {
+    headers.authorization = `Bearer ${authToken}`;
+    if (useApiKey) {
+      headers["X-API-Key"] = apiKey || legacyToken;
+    }
+  }
+  headers["X-CodeBuddy-Request"] = "1";
+  return headers;
 }
 
 export function createCodeBuddyHeaders(options = {}) {
@@ -162,7 +271,7 @@ export function createCodeBuddyHeaders(options = {}) {
     "content-type": "application/json",
   };
 
-  if (!options.exemptRequestHeader) {
+  if (options.exemptRequestHeader !== true && options.includeRequestHeader !== false) {
     headers["x-codebuddy-request"] = "1";
   }
 
@@ -173,24 +282,52 @@ export function createCodeBuddyHeaders(options = {}) {
   return headers;
 }
 
+function normalizeCodeBuddyChatCompletionsPath(value) {
+  const text = String(value || "/v2/chat/completions").trim();
+  if (!text) return "/v2/chat/completions";
+  return text.startsWith("/") ? text : `/${text}`;
+}
+
+function resolveCodeBuddyChatEndpoint(options = {}) {
+  const endpoint = String(options.apiEndpoint || options.endpoint || options.chatEndpoint || "").trim();
+  if (endpoint) return endpoint.replace(/\/+$/, "");
+  return `${normalizeBaseUrl(options.baseUrl)}${normalizeCodeBuddyChatCompletionsPath(
+    options.chatCompletionsPath || options.endpointPath,
+  )}`;
+}
+
 export function buildCodeBuddyRunRequest(messages = [], options = {}) {
-  const baseHeaders = createCodeBuddyHeaders({
-    token: options.token,
-    exemptRequestHeader: true,
-  });
-  const normalizedMessages = normalizeOpenAiMessages(messages);
+  const bearerToken = String(options.bearerToken || "").trim();
+  const apiKey = String(options.apiKey || "").trim();
+  const token = String(options.token || "").trim();
+  const baseHeaders = bearerToken || apiKey || token
+    ? buildCodeBuddyCloudHeaders({
+      bearerToken,
+      apiKey,
+      token: bearerToken ? "" : token,
+      baseUrl: options.baseUrl,
+      conversationId: options.conversationId,
+      conversationRequestId: options.conversationRequestId,
+      conversationMessageId: options.conversationMessageId,
+      requestId: options.requestId,
+      userId: options.userId,
+    })
+    : createCodeBuddyHeaders({ token: options.token, includeRequestHeader: options.includeRequestHeader });
+  const normalizedMessages = ensureCodeBuddyUpstreamMessages(messages);
+  const maxCompletionTokens = Number(options.maxCompletionTokens ?? options.maxTokens ?? 0);
+  const stream = options.stream !== false;
   return {
     method: "POST",
-    url: `${normalizeBaseUrl(options.baseUrl)}/v2/chat/completions`,
+    url: resolveCodeBuddyChatEndpoint(options),
     headers: {
       ...baseHeaders,
       ...(options.headers && typeof options.headers === "object" ? options.headers : {}),
     },
     body: {
-      model: options.model || "claude-sonnet-4.5",
-      messages: normalizedMessages.length > 0 ? normalizedMessages : [{ role: "user", content: "" }],
-      stream: Boolean(options.stream),
-      ...(options.maxTokens ? { max_tokens: Number(options.maxTokens) } : {}),
+      model: options.model || "auto",
+      messages: normalizedMessages,
+      stream,
+      ...(maxCompletionTokens > 0 ? { max_completion_tokens: maxCompletionTokens } : {}),
       ...(options.tools ? { tools: options.tools } : {}),
       ...(options.toolChoice ? { tool_choice: options.toolChoice } : {}),
     },
@@ -429,13 +566,30 @@ async function readJsonResponse(response) {
   return parsed && typeof parsed === "object" ? parsed : {};
 }
 
-function getCodeBuddyErrorMessage(payload = {}, fallback = "CodeBuddy upstream error") {
-  if (payload?.error && typeof payload.error === "object") {
-    return String(payload.error.message || payload.error.code || fallback);
+function getCodeBuddyErrorHint(payload = {}, status = 0) {
+  const code = payload?.code;
+  if (code === 11140 || /request illegal/i.test(String(payload?.msg || ""))) {
+    return "请确认 API Key 来自 Profile Keys（国际站 codebuddy.ai/profile/keys），且账号已开通云端聊天；站点需与 Key 一致。";
   }
-  if (typeof payload?.error === "string") return payload.error;
-  if (typeof payload?.message === "string") return payload.message;
-  return fallback;
+  if (status === 401 || /invalid_secret/i.test(String(payload?.message || ""))) {
+    return "认证失败：勿同时发送重复的 x-api-key 头；仅使用 Bearer 与 X-API-Key 各一份。";
+  }
+  return "";
+}
+
+function getCodeBuddyErrorMessage(payload = {}, fallback = "CodeBuddy upstream error", status = 0) {
+  let message = fallback;
+  if (payload?.error && typeof payload.error === "object") {
+    message = String(payload.error.message || payload.error.code || fallback);
+  } else if (typeof payload?.error === "string") {
+    message = payload.error;
+  } else if (typeof payload?.message === "string") {
+    message = payload.message;
+  } else if (payload?.code != null && payload?.msg) {
+    message = `${payload.msg} (code ${payload.code})`;
+  }
+  const hint = getCodeBuddyErrorHint(payload, status);
+  return hint ? `${message} — ${hint}` : message;
 }
 
 function extractCodeBuddyRunId(payload = {}) {
@@ -511,9 +665,9 @@ export async function runCodeBuddyCompletion(messages = [], options = {}) {
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new Error("fetch is not available for CodeBuddy provider");
 
-  const stream = Boolean(options.stream ?? options.onDelta);
   const started = Date.now();
-  const request = buildCodeBuddyRunRequest(messages, { ...options, stream });
+  const request = buildCodeBuddyRunRequest(messages, options);
+  const stream = request.body.stream === true;
   const runResponse = await fetchImpl(request.url, {
     method: request.method,
     headers: request.headers,
@@ -529,7 +683,7 @@ export async function runCodeBuddyCompletion(messages = [], options = {}) {
     } catch {
       errorPayload = {};
     }
-    throw new Error(`CodeBuddy chat completion failed with ${runResponse.status}: ${getCodeBuddyErrorMessage(errorPayload, errorText).slice(0, 300)}`);
+    throw new Error(`CodeBuddy chat completion failed with ${runResponse.status}: ${getCodeBuddyErrorMessage(errorPayload, errorText, runResponse.status).slice(0, 400)}`);
   }
 
   if (!stream) {

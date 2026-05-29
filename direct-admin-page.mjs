@@ -275,7 +275,7 @@ export function buildDirectAdminHtml() {
         <div class="codebuddy-summary" id="codebuddySummary">
           <div class="kv"><span class="kv-label">Provider</span><span class="kv-value" id="codebuddyProvider">codebuddy</span></div>
           <div class="kv"><span class="kv-label">Base URL</span><span class="kv-value mono" id="codebuddyBaseUrl" title="-">-</span></div>
-          <div class="kv"><span class="kv-label">默认模型</span><span class="kv-value mono" id="codebuddyDefaultModel">codebuddy/default</span></div>
+          <div class="kv"><span class="kv-label">默认模型</span><span class="kv-value mono" id="codebuddyDefaultModel">codebuddy/auto</span></div>
           <div class="kv"><span class="kv-label">账号池</span><span class="kv-value" id="codebuddyAccountSummary">总计 0 · 启用 0 · 禁用 0</span></div>
         </div>
 
@@ -290,7 +290,7 @@ export function buildDirectAdminHtml() {
                 <tr>
                   <th>备注</th>
                   <th>类型</th>
-                  <th>登录</th>
+                  <th>凭证</th>
                   <th>状态</th>
                   <th>站点</th>
                   <th>Base URL</th>
@@ -324,10 +324,40 @@ export function buildDirectAdminHtml() {
           </div>
         </div>
 
+        <div class="subsection" id="codebuddyOAuthPanel">
+          <div class="subsection-head">
+            <span class="subsection-title">OAuth 登录 <span class="tag">RECOMMENDED</span></span>
+            <span class="subsection-note">Profile 里的访问密钥仅适用于 CLI/SDK；云端聊天请用网页登录获取 Bearer。</span>
+          </div>
+          <div class="split">
+            <div class="field">
+              <label for="cbOAuthLabel">账号备注</label>
+              <input id="cbOAuthLabel" placeholder="CodeBuddy OAuth" />
+            </div>
+            <div class="field">
+              <label for="cbOAuthSite">站点</label>
+              <select id="cbOAuthSite">
+                <option value="global" selected>国外站 codebuddy.ai</option>
+                <option value="domestic">国内站 codebuddy.cn</option>
+              </select>
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px; flex-wrap: wrap;">
+            <button class="primary" id="cbOAuthStartBtn" type="button">开始 OAuth 登录</button>
+            <button id="cbOAuthOpenBtn" type="button" disabled>打开登录页</button>
+            <button id="cbOAuthPollBtn" type="button" disabled>检查登录 / 导入</button>
+          </div>
+          <div class="oauth-box" id="cbOAuthStatusBox" style="margin-top: 12px;">尚未开始 OAuth。</div>
+          <div class="import-hint">
+            流程：点击「开始 OAuth」→「打开登录页」在 CodeBuddy 官网登录 → 回到本页点击「检查登录」或等待自动检测。成功后账号类型为 OAuth Bearer，可用于 /v2/chat/completions。
+          </div>
+          <div class="toast-line" id="cbOAuthToast"></div>
+        </div>
+
         <div class="subsection" id="codebuddyApiKeyPanel">
           <div class="subsection-head">
-            <span class="subsection-title">API Key 导入 <span class="tag">CODEBUDDY</span></span>
-            <span class="subsection-note">只粘贴 CodeBuddy API Key，导入后会进入账号池轮询。</span>
+            <span class="subsection-title">API Key 导入 <span class="tag">CLI/SDK</span></span>
+            <span class="subsection-note">访问密钥仅供 CLI / Agent SDK；若探针报 11140，请改用上方 OAuth。</span>
           </div>
           <div class="split">
             <div class="field">
@@ -337,9 +367,13 @@ export function buildDirectAdminHtml() {
             <div class="field">
               <label for="cbApiKeySite">站点</label>
               <select id="cbApiKeySite">
+                <option value="global" selected>国外站 codebuddy.ai</option>
                 <option value="domestic">国内站 codebuddy.cn / copilot.tencent.com</option>
-                <option value="global">国外站 codebuddy.ai</option>
               </select>
+            </div>
+            <div class="field">
+              <label for="cbApiEndpoint">API Endpoint（可选）</label>
+              <input id="cbApiEndpoint" autocomplete="off" placeholder="留空按站点自动选择；内网可填 https://copilot.tencent.com/v2/chat/completions" />
             </div>
             <div class="field">
               <label for="cbApiKeyValue">API Key</label>
@@ -351,7 +385,7 @@ export function buildDirectAdminHtml() {
             <button id="cbApiKeyClearBtn" type="button">清空</button>
           </div>
           <div class="import-hint">
-            推荐流程：选择 API Key 对应站点，粘贴 CodeBuddy API Key，点击导入，然后直接运行探针。
+            推荐流程：从 CodeBuddy 控制台 Profile Keys 复制 API Key，选择同站点导入，然后直接运行探针。内网或特殊域名才需要填写 API Endpoint。
           </div>
           <div class="toast-line" id="cbApiKeyToast"></div>
         </div>
@@ -364,9 +398,7 @@ export function buildDirectAdminHtml() {
             <div class="field">
               <label for="cbProbeModel">模型</label>
               <select id="cbProbeModel">
-                <option value="codebuddy/claude-sonnet-4.5">codebuddy/claude-sonnet-4.5</option>
-                <option value="codebuddy/claude-opus-4.5">codebuddy/claude-opus-4.5</option>
-                <option value="codebuddy/gpt-5.1">codebuddy/gpt-5.1</option>
+                <option value="codebuddy/auto">codebuddy/auto</option>
               </select>
             </div>
             <div class="field">
@@ -394,6 +426,7 @@ export function buildDirectAdminHtml() {
       remember: localStorage.getItem('cursor_direct_admin_remember') === '1',
       importMode: 'single',
       oauthUrl: '',
+      codebuddyOAuth: { session: null, pollTimer: null },
       status: null,
       accountsPayload: null,
       models: [],
@@ -665,7 +698,9 @@ export function buildDirectAdminHtml() {
       renderCodeBuddy();
     }
     function codeBuddyAuthTypeLabel(type) {
-      return type === 'api_key' ? 'API Key' : '-';
+      if (type === 'bearer') return 'OAuth Bearer';
+      if (type === 'api_key') return 'API Key';
+      return '-';
     }
     function codeBuddySiteLabel(site) {
       const normalized = String(site || '').toLowerCase();
@@ -673,10 +708,13 @@ export function buildDirectAdminHtml() {
       if (normalized === 'global') return '国外站';
       return site || '-';
     }
-    function codeBuddyLoggedInPill(value) {
+    function codeBuddyLoggedInPill(value, account) {
+      if (account && account.authType === 'bearer') return '<span class="pill good">OAuth</span>';
+      if (account && account.authType === 'api_key') return '<span class="pill good">API Key</span>';
+      if (account && account.hasCredentials) return '<span class="pill good">已配置</span>';
       if (value === true) return '<span class="pill good">是</span>';
       if (value === false) return '<span class="pill bad">否</span>';
-      return '<span class="pill muted">未知</span>';
+      return '<span class="pill muted">-</span>';
     }
     function codeBuddyBoolMark(value) {
       if (value === true) return '<span class="pill good">✓</span>';
@@ -686,182 +724,16 @@ export function buildDirectAdminHtml() {
     function codeBuddyAccountLabel(account) {
       return account?.label || account?.userName || account?.userNickname || account?.id || '未命名账号';
     }
-    function normalizeCodeBuddyOAuthUrl(value) {
-      const text = String(value || '').trim();
-      if (!text) return '';
-      const absolute = /^[a-z][a-z0-9+.-]*:\\/\\//i.test(text);
-      let origin = '';
-      try {
-        if (typeof window !== 'undefined' && window.location && window.location.origin) {
-          origin = String(window.location.origin || '').replace(/\\/+$/, '');
-        }
-      } catch (_e) {
-        origin = '';
-      }
-      try {
-        const parsed = new URL(text, origin || 'http://localhost');
-        const host = parsed.hostname.toLowerCase();
-        const loopback = host === 'localhost' || host === '0.0.0.0' || host === '::1' || host.startsWith('127.');
-        if (parsed.pathname === '/direct-admin/codebuddy/oauth/launch') return '';
-        if (!absolute) return '';
-        if (loopback) return '';
-        return parsed.href;
-      } catch (_e) {
-        return '';
-      }
-    }
-    function normalizeCodeBuddyOAuthCallbackUrl(value) {
-      return String(value || '').trim();
-      const text = String(value || '').trim();
-      if (!text) return '';
-      if (/^\\/direct-admin\\/codebuddy\\/oauth\\/callback(?:\\?|$)/.test(text)) return text;
-      if (!/^[a-z][a-z0-9+.-]*:\\/\\//i.test(text) && !/callback|oauth|auth|code=|state=/i.test(text)) return '';
-      try {
-        const parsed = new URL(text, window.location.origin);
-        if (parsed.pathname === '/direct-admin/codebuddy/oauth/callback') {
-          return parsed.pathname + parsed.search;
-        }
-      } catch (_e) {
-        return '';
-      }
-      return text;
-    }
-    function buildUnusedCodeBuddyStorageCollectorScript() {
-      return [
-        '(() => {',
-        '  const keyLike = /codebuddy|token|auth|refresh|session|api[_-]?key/i;',
-        '  const out = {',
-        '    label: "CodeBuddy Web " + location.hostname,',
-        '    webOrigin: location.origin,',
-        '    authToken: "",',
-        '    refreshToken: "",',
-        '    apiKey: "",',
-        '    cookie: document.cookie || "",',
-        '    note: "Use API Key import instead.",',
-        '    capturedAt: new Date().toISOString(),',
-        '    raw: {}',
-        '  };',
-        '  const looksLikeSecret = (value) => {',
-        '    const text = String(value || "").trim().replace(/^[\\\'"]|[\\\'"]$/g, "");',
-        '    if (!text || text.length < 16) return false;',
-        '    if (/^\\\\d{10,}$/.test(text)) return false;',
-        '    if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(text)) return false;',
-        '    return /^eyJ[A-Za-z0-9_-]*\\\\./.test(text) || (/[A-Za-z]/.test(text) && /[A-Za-z0-9]/.test(text));',
-        '  };',
-        '  const set = (name, value) => {',
-        '    value = String(value || "").trim();',
-        '    if (!value || value.length < 8) return;',
-        '    if ((name === "apiKey" || name === "refreshToken" || name === "authToken") && !looksLikeSecret(value)) return;',
-        '    if (name === "apiKey" && !out.apiKey) out.apiKey = value;',
-        '    else if (name === "refreshToken" && !out.refreshToken) out.refreshToken = value;',
-        '    else if (!out.authToken) out.authToken = value;',
-        '  };',
-        '  const walk = (value, path, depth) => {',
-        '    if (depth > 6 || value == null) return;',
-        '    if (typeof value === "string") {',
-        '      const p = String(path || "");',
-        '      if (/api[_-]?key|apiKey|x-api-key/i.test(p)) set("apiKey", value);',
-        '      else if (/refresh[_-]?token|refreshToken/i.test(p)) set("refreshToken", value);',
-        '      else if (/access[_-]?token|auth[_-]?token|authToken|token/i.test(p)) set("authToken", value);',
-        '      return;',
-        '    }',
-        '    if (typeof value !== "object") return;',
-        '    for (const [k, v] of Object.entries(value)) walk(v, path ? path + "." + k : k, depth + 1);',
-        '  };',
-        '  const scanStore = (store, name) => {',
-        '    for (let i = 0; i < store.length; i += 1) {',
-        '      const key = store.key(i);',
-        '      const value = store.getItem(key);',
-        '      if (!keyLike.test(key) && !keyLike.test(String(value || ""))) continue;',
-        '      out.raw[name + "." + key] = String(value || "").slice(0, 4000);',
-        '      try { walk(JSON.parse(value), key, 0); } catch { walk(value, key, 0); }',
-        '    }',
-        '  };',
-        '  scanStore(localStorage, "localStorage");',
-        '  scanStore(sessionStorage, "sessionStorage");',
-        '  const text = JSON.stringify(out, null, 2);',
-        '  console.log(text);',
-        '  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(() => console.log("CodeBuddy credential JSON copied."));',
-        '  return out;',
-        '})();',
-      ].join('\\n');
-    }
-    function buildUnusedCodeBuddyCookieCollectorScript() {
-      return [
-        '(() => {',
-        '  const out = {',
-        '    label: "CodeBuddy Cookie " + location.hostname,',
-        '    webOrigin: location.origin,',
-        '    cookie: document.cookie || "",',
-        '    note: "Use API Key import instead.",',
-        '    capturedAt: new Date().toISOString()',
-        '  };',
-        '  const text = JSON.stringify(out, null, 2);',
-        '  console.log(text);',
-        '  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(() => console.log("CodeBuddy cookie JSON copied."));',
-        '  return out;',
-        '})();',
-      ].join('\\n');
-    }
-    function buildUnusedCodeBuddyHelperTemplate() {
-      return [
-        '#!/usr/bin/env sh',
-        '# 保存为 /opt/cursor-direct-gateway/codebuddy-token-helper.sh 并 chmod +x',
-        '# 要求：stdout 只输出一行可用的 CODEBUDDY_AUTH_TOKEN 或 CODEBUDDY_API_KEY',
-        'set -eu',
-        'printf "%s\\\\n" "\${CODEBUDDY_AUTH_TOKEN:-\${CODEBUDDY_API_KEY:-}}"',
-      ].join('\\n');
-    }
-    function setUnusedCodeBuddyCredentialSnippet(kind, button) {
-      const script = kind === 'cookie'
-        ? buildCodeBuddyCookieCollectorScript()
-        : kind === 'helper'
-        ? buildCodeBuddyHelperTemplate()
-        : buildCodeBuddyStorageCollectorScript();
-      state.codebuddy.oauthUrl = script;
-      const box = $('cbOauthUrl');
-      if (box) {
-        box.value = script;
-        box.focus();
-        box.select();
-      }
-      const label = 'API Key 导入';
-      copyText(script, label, button);
-      setInlineToast('cbApiKeyToast', '✓ ' + label + '已切换。');
-    }
     function renderCodeBuddyApiKeyImport() {
       const labelInput = $('cbApiKeyLabel');
       if (labelInput && !labelInput.value) labelInput.value = state.codebuddy.apiKeyLabel || 'CodeBuddy API Key';
       const keyInput = $('cbApiKeyValue');
       if (keyInput && !keyInput.placeholder) keyInput.placeholder = '粘贴 CodeBuddy API Key';
+      const endpointInput = $('cbApiEndpoint');
+      if (endpointInput && !endpointInput.placeholder) endpointInput.placeholder = '留空按站点自动选择';
+      if (endpointInput && !endpointInput.value) endpointInput.value = state.codebuddy.apiEndpoint || '';
       const toast = $('cbApiKeyToast');
       if (toast && !toast.textContent) toast.textContent = '只保留 API Key 导入。';
-      return;
-      const accounts = state.codebuddy.accounts || {};
-      const currentSnippet = state.codebuddy.oauthUrl || buildCodeBuddyStorageCollectorScript();
-      state.codebuddy.oauthUrl = currentSnippet;
-      const urlBox = $('cbOauthUrl');
-      if (urlBox && !urlBox.value) urlBox.value = currentSnippet;
-      $('cbOauthOpenBtn').disabled = false;
-      $('cbOauthCopyBtn').disabled = false;
-      const modal = $('cbOauthModal');
-      const modalUrlBox = $('cbOauthModalUrl');
-      if (modalUrlBox && modal && !modal.classList.contains('hidden')) modalUrlBox.value = currentSnippet;
-      const modalOpenBtn = $('cbOauthModalOpenBtn');
-      if (modalOpenBtn) modalOpenBtn.disabled = false;
-      const modalCopyBtn = $('cbOauthModalCopyBtn');
-      if (modalCopyBtn) modalCopyBtn.disabled = false;
-      const statusBox = $('cbOauthStatusBox');
-      if (statusBox) {
-        statusBox.textContent = [
-          '推荐 1: Profile Keys / API Keys 页面复制 CODEBUDDY_API_KEY，直接粘贴导入。',
-          '推荐 2: 导入后先运行探针确认可用。',
-          '推荐 3: 账号池会自动轮询启用的 API Key。',
-          '推荐 4: 非 API Key 记录不会参与调用。',
-          '账号池: ' + ((accounts && typeof accounts === 'object') ? String(accounts.count || 0) : '0'),
-          '当前模式: ' + (($('cbCredentialMode') && $('cbCredentialMode').value) || 'auto'),
-        ].join('\\n');
-      }
     }
     function renderCodeBuddySummary() {
       const status = state.codebuddy.status || {};
@@ -869,37 +741,37 @@ export function buildDirectAdminHtml() {
         ? state.codebuddy.accounts
         : (status.accounts && typeof status.accounts === 'object' ? status.accounts : {});
       const unsupported = Boolean(state.codebuddy.unsupported || status.unsupported);
-      const configured = !unsupported && Boolean(status && (status.configured === true || status.baseUrl));
-      const baseUrl = status.baseUrl || '-';
+      const configured = !unsupported && Boolean(
+        status.configured === true || pool.primary?.hasCredentials || (pool.enabledCount || 0) > 0,
+      );
+      const baseUrl = status.chatEndpoint || status.baseUrl || '-';
       const models = Array.isArray(state.codebuddy.models) && state.codebuddy.models.length
         ? state.codebuddy.models
         : (Array.isArray(status.models) ? status.models : []);
-      const defaultModel = (models[0] && (models[0].id || models[0].modelId)) || 'codebuddy/default';
+      const defaultModel = (models[0] && (models[0].id || models[0].modelId)) || 'codebuddy/auto';
 
       const configPill = $('codebuddyConfigPill');
       configPill.textContent = unsupported ? '未接入' : (configured ? '已配置' : '未配置');
       configPill.className = 'pill ' + (unsupported ? 'warn' : (configured ? 'good' : 'muted'));
 
       const authPill = $('codebuddyAuthPill');
-      const loggedIn = pool && typeof pool.loggedIn === 'boolean'
-        ? pool.loggedIn
-        : (status.authStatus && typeof status.authStatus.authenticated === 'boolean' ? status.authStatus.authenticated : null);
-      const accessAllowed = Boolean(status.authStatus && status.authStatus.accessAllowed);
+      const hasCreds = Boolean(pool.primary?.hasCredentials || (pool.enabledCount || 0) > 0);
+      const primaryType = pool.primary?.authType || '';
       if (unsupported) {
         authPill.textContent = '接口未启用';
         authPill.className = 'pill muted';
-      } else if (loggedIn === true) {
-        authPill.textContent = '已确认';
+      } else if (hasCreds && primaryType === 'bearer') {
+        authPill.textContent = 'OAuth 已配置';
         authPill.className = 'pill good';
-      } else if (accessAllowed) {
-        authPill.textContent = '待确认';
-        authPill.className = 'pill warn';
-      } else if (loggedIn === false) {
-        authPill.textContent = '未登录';
+      } else if (hasCreds) {
+        authPill.textContent = '凭证已配置';
+        authPill.className = 'pill good';
+      } else if (state.codebuddyOAuth.session && state.codebuddyOAuth.session.status === 'waiting') {
+        authPill.textContent = '等待 OAuth';
         authPill.className = 'pill warn';
       } else {
-        authPill.textContent = '状态未知';
-        authPill.className = 'pill muted';
+        authPill.textContent = '未登录';
+        authPill.className = 'pill warn';
       }
 
       $('codebuddyProvider').textContent = status.provider || 'codebuddy';
@@ -950,7 +822,7 @@ export function buildDirectAdminHtml() {
           return '<tr>' +
             '<td class="cell-wrap" title="' + label + '">' + label + '</td>' +
             '<td>' + authType + '</td>' +
-            '<td>' + codeBuddyLoggedInPill(account.loggedIn) + '</td>' +
+            '<td>' + codeBuddyLoggedInPill(account.loggedIn, account) + '</td>' +
             '<td>' + renderStatusBadge(enabled) + '</td>' +
             '<td><span class="pill info">' + site + '</span></td>' +
             '<td class="cell-mono" title="' + baseUrl + '">' + baseUrl + '</td>' +
@@ -991,8 +863,8 @@ export function buildDirectAdminHtml() {
         ? state.codebuddy.models
         : (Array.isArray(status.models) ? status.models : []);
       if (!models.length) {
-        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">// 未返回模型。默认使用 codebuddy/default。</div></td></tr>';
-        $('codebuddyModelNote').textContent = '共 0 个模型';
+        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-state">// 未返回模型。默认使用 codebuddy/auto。</div></td></tr>';
+        $('codebuddyModelNote').textContent = '共 0 个配置别名（非上游实时列表）';
       } else {
         tbody.innerHTML = models.map((model) => {
           const id = escapeHtml(model.id || model.modelId || '-');
@@ -1006,18 +878,132 @@ export function buildDirectAdminHtml() {
             '<td>' + images + '</td>' +
           '</tr>';
         }).join('');
-        $('codebuddyModelNote').textContent = '共 ' + models.length + ' 个模型';
+        $('codebuddyModelNote').textContent = '共 ' + models.length + ' 个配置别名（来自网关配置，非上游实时拉取）';
       }
       const select = $('cbProbeModel');
       if (select) {
         const current = select.value;
-        const ids = Array.from(new Set(['codebuddy/default'].concat((models || []).map((m) => m.id || m.modelId).filter(Boolean))));
+        const ids = Array.from(new Set(['codebuddy/auto'].concat((models || []).map((m) => m.id || m.modelId).filter(Boolean))));
         select.innerHTML = ids.map((id) => '<option value="' + escapeHtml(id) + '">' + escapeHtml(id) + '</option>').join('');
-        select.value = ids.includes(current) ? current : (ids[0] || 'codebuddy/default');
+        select.value = ids.includes(current) ? current : (ids[0] || 'codebuddy/auto');
+      }
+    }
+    function renderCodeBuddyOAuth() {
+      const session = state.codebuddyOAuth.session || {};
+      const loginUrl = session.externalAuthUrl || session.url || (session.login && session.login.url) || '';
+      const launchUrl = session.gatewayLaunchUrl || session.launchUrl || '';
+      const openBtn = $('cbOAuthOpenBtn');
+      const pollBtn = $('cbOAuthPollBtn');
+      if (openBtn) {
+        openBtn.disabled = !loginUrl && !launchUrl;
+      }
+      if (pollBtn) {
+        pollBtn.disabled = !session.id || session.status === 'complete';
+      }
+      const box = $('cbOAuthStatusBox');
+      if (box) {
+        box.textContent = [
+          '状态: ' + (session.status || 'idle'),
+          '站点: ' + (session.site || '-'),
+          '会话 ID: ' + (session.id || '-'),
+          '登录页: ' + (loginUrl || '-'),
+          '错误: ' + (session.error || '-'),
+        ].join('\\n');
+      }
+    }
+    function stopCodeBuddyOAuthPoll() {
+      if (state.codebuddyOAuth.pollTimer) {
+        clearInterval(state.codebuddyOAuth.pollTimer);
+        state.codebuddyOAuth.pollTimer = null;
+      }
+    }
+    function startCodeBuddyOAuthPoll() {
+      stopCodeBuddyOAuthPoll();
+      state.codebuddyOAuth.pollTimer = setInterval(function() {
+        pollCodeBuddyOAuth(true).catch(function() {});
+      }, 5000);
+    }
+    async function startCodeBuddyOAuth() {
+      setInlineToast('cbOAuthToast', '// 正在启动 CodeBuddy OAuth...');
+      const btn = $('cbOAuthStartBtn');
+      if (btn) btn.disabled = true;
+      stopCodeBuddyOAuthPoll();
+      try {
+        const label = (($('cbOAuthLabel') && $('cbOAuthLabel').value) || '').trim() || 'CodeBuddy OAuth';
+        const site = (($('cbOAuthSite') && $('cbOAuthSite').value) || 'global').trim() || 'global';
+        const payload = await api('/codebuddy/oauth/start', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ label, site }),
+        });
+        state.codebuddyOAuth.session = payload.session || null;
+        if (payload.accounts) state.codebuddy.accounts = payload.accounts;
+        renderCodeBuddyOAuth();
+        renderCodeBuddy();
+        if (payload.session && payload.session.status === 'waiting') {
+          setInlineToast('cbOAuthToast', '✓ 已生成登录链接，请打开登录页完成授权。');
+          showToast('请在新窗口完成 CodeBuddy 登录', 'info');
+          startCodeBuddyOAuthPoll();
+          const loginUrl = payload.session.externalAuthUrl || payload.session.url || '';
+          if (loginUrl) window.open(loginUrl, '_blank', 'noopener,noreferrer');
+        } else {
+          setInlineToast('cbOAuthToast', '✗ ' + (payload.session && payload.session.error ? payload.session.error : 'OAuth 启动失败'));
+        }
+      } catch (error) {
+        setInlineToast('cbOAuthToast', '✗ ' + error.message);
+        showToast('OAuth 启动失败：' + error.message, 'error');
+      } finally {
+        if (btn) btn.disabled = state.busy;
+      }
+    }
+    function openCodeBuddyOAuthPage() {
+      const session = state.codebuddyOAuth.session || {};
+      const url = session.externalAuthUrl || session.url || session.gatewayLaunchUrl || session.launchUrl || '';
+      if (!url) {
+        showToast('请先生成 OAuth 登录', 'info');
+        return;
+      }
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+    async function pollCodeBuddyOAuth(silent) {
+      const pollBtn = $('cbOAuthPollBtn');
+      if (pollBtn && !silent) pollBtn.disabled = true;
+      try {
+        const payload = await api('/codebuddy/oauth/poll', { method: 'POST' });
+        state.codebuddyOAuth.session = payload.session || state.codebuddyOAuth.session;
+        if (payload.accounts) state.codebuddy.accounts = payload.accounts;
+        renderCodeBuddyOAuth();
+        renderCodeBuddy();
+        if (payload.ok) {
+          stopCodeBuddyOAuthPoll();
+          setInlineToast('cbOAuthToast', '✓ OAuth 登录成功，Bearer 已导入账号池。');
+          if (!silent) showToast('CodeBuddy OAuth 登录成功', 'success');
+          await refreshCodeBuddy(true);
+          return;
+        }
+        if (payload.pending) {
+          if (!silent) {
+            setInlineToast('cbOAuthToast', '// 等待你在 CodeBuddy 页面完成登录...');
+            showToast('仍在等待登录', 'info');
+          }
+          return;
+        }
+        stopCodeBuddyOAuthPoll();
+        const msg = payload.message || (payload.session && payload.session.error) || 'OAuth 未完成';
+        setInlineToast('cbOAuthToast', '✗ ' + msg);
+        if (!silent) showToast(msg, 'error');
+      } catch (error) {
+        if (!silent) {
+          setInlineToast('cbOAuthToast', '✗ ' + error.message);
+          showToast('检查登录失败：' + error.message, 'error');
+        }
+      } finally {
+        if (pollBtn) pollBtn.disabled = state.busy || !(state.codebuddyOAuth.session && state.codebuddyOAuth.session.id);
       }
     }
     function renderCodeBuddy() {
       renderCodeBuddySummary();
+      renderCodeBuddyOAuth();
       renderCodeBuddyApiKeyImport();
       renderCodeBuddyAccounts();
       renderCodeBuddyModels();
@@ -1077,49 +1063,6 @@ export function buildDirectAdminHtml() {
       }
       renderCodeBuddy();
     }
-    function getCodeBuddyLoginModalUrl() {
-      const modalValue = $('cbOauthModalUrl') ? $('cbOauthModalUrl').value : '';
-      return String(modalValue || state.codebuddy.oauthUrl || '').trim();
-    }
-    function setCodeBuddyLoginModalOpen(open) {
-      const modal = $('cbOauthModal');
-      if (!modal) return;
-      modal.classList.toggle('hidden', !open);
-      document.body.classList.toggle('modal-open', Boolean(open));
-    }
-    function openCodeBuddyLoginModal(value) {
-      const snippet = String(value || state.codebuddy.oauthUrl || buildCodeBuddyStorageCollectorScript()).trim();
-      if (!snippet) {
-        showToast('尚未生成可复制的 CodeBuddy 采集脚本', 'info');
-        return;
-      }
-      state.codebuddy.oauthUrl = snippet;
-      const box = $('cbOauthModalUrl');
-      if (box) box.value = snippet;
-      const openBtn = $('cbOauthModalOpenBtn');
-      if (openBtn) openBtn.disabled = false;
-      const copyBtn = $('cbOauthModalCopyBtn');
-      if (copyBtn) copyBtn.disabled = false;
-      setInlineToast('cbOauthModalToast', '');
-      setCodeBuddyLoginModalOpen(true);
-      if (box) {
-        try {
-          box.focus();
-          box.select();
-        } catch (_e) {}
-      }
-    }
-    function closeCodeBuddyLoginModal() {
-      setCodeBuddyLoginModalOpen(false);
-    }
-    function openCodeBuddyLoginWindow(value) {
-      const snippet = String(value || state.codebuddy.oauthUrl || buildCodeBuddyCookieCollectorScript()).trim();
-      if (!snippet) return;
-      copyText(snippet, 'CodeBuddy 采集脚本', $('cbOauthOpenBtn'));
-    }
-    function startUnusedCodeBuddyOAuth() {
-      setUnusedCodeBuddyCredentialSnippet('storage', $('cbOauthStartBtn'));
-    }
     async function importCodeBuddyApiKey() {
       setInlineToast('cbApiKeyToast', '// 正在导入 CodeBuddy API Key...');
       const button = $('cbApiKeyImportBtn');
@@ -1132,12 +1075,14 @@ export function buildDirectAdminHtml() {
           return;
         }
         const label = (($('cbApiKeyLabel') && $('cbApiKeyLabel').value) || '').trim() || 'CodeBuddy API Key';
-        const site = (($('cbApiKeySite') && $('cbApiKeySite').value) || 'domestic').trim() || 'domestic';
+        const site = (($('cbApiKeySite') && $('cbApiKeySite').value) || 'global').trim() || 'global';
+        const apiEndpoint = (($('cbApiEndpoint') && $('cbApiEndpoint').value) || '').trim();
         state.codebuddy.apiKeyLabel = label;
+        state.codebuddy.apiEndpoint = apiEndpoint;
         const result = await api('/codebuddy/accounts/import', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ label, apiKey, site }),
+          body: JSON.stringify({ label, apiKey, site, apiEndpoint }),
         });
         applyCodeBuddyImportResult(result);
         if (result.ok) {
@@ -1188,7 +1133,7 @@ export function buildDirectAdminHtml() {
       box.innerHTML = lines.map((line) => '<div class="probe-line">' + line + '</div>').join('');
     }
     async function runCodeBuddyProbe() {
-      const model = ($('cbProbeModel').value || '').trim() || 'codebuddy/default';
+      const model = ($('cbProbeModel').value || '').trim() || 'codebuddy/auto';
       const accountId = ($('cbProbeAccount').value || '').trim();
       renderCodeBuddyProbeResult(['<strong>状态</strong> 正在请求 ' + escapeHtml(model) + '...'], '');
       $('cbProbeBtn').disabled = true;
@@ -1513,43 +1458,20 @@ export function buildDirectAdminHtml() {
       });
     }
     const cbApiKeyClearBtn = $('cbApiKeyClearBtn');
+    const cbOAuthStartBtn = $('cbOAuthStartBtn');
+    if (cbOAuthStartBtn) cbOAuthStartBtn.addEventListener('click', startCodeBuddyOAuth);
+    const cbOAuthOpenBtn = $('cbOAuthOpenBtn');
+    if (cbOAuthOpenBtn) cbOAuthOpenBtn.addEventListener('click', openCodeBuddyOAuthPage);
+    const cbOAuthPollBtn = $('cbOAuthPollBtn');
+    if (cbOAuthPollBtn) cbOAuthPollBtn.addEventListener('click', () => pollCodeBuddyOAuth(false));
     if (cbApiKeyClearBtn) cbApiKeyClearBtn.addEventListener('click', () => {
       if ($('cbApiKeyValue')) $('cbApiKeyValue').value = '';
       setInlineToast('cbApiKeyToast', '');
     });
     const cbApiKeyLabel = $('cbApiKeyLabel');
     if (cbApiKeyLabel && !cbApiKeyLabel.value) cbApiKeyLabel.value = state.codebuddy.apiKeyLabel || 'CodeBuddy API Key';
-    const cbOauthStartBtn = $('cbOauthStartBtn');
-    if (cbOauthStartBtn) cbOauthStartBtn.addEventListener('click', startCodeBuddyOAuth);
-    const cbOauthOpenBtn = $('cbOauthOpenBtn');
-    if (cbOauthOpenBtn) cbOauthOpenBtn.addEventListener('click', () => {
-      setCodeBuddyCredentialSnippet('cookie', cbOauthOpenBtn);
-    });
-    const cbOauthCopyBtn = $('cbOauthCopyBtn');
-    if (cbOauthCopyBtn) cbOauthCopyBtn.addEventListener('click', () => {
-      setCodeBuddyCredentialSnippet('helper', cbOauthCopyBtn);
-    });
-    const cbOauthCheckBtn = $('cbOauthCheckBtn');
-    if (cbOauthCheckBtn) cbOauthCheckBtn.addEventListener('click', checkCodeBuddyOAuth);
-    const cbOauthModal = $('cbOauthModal');
-    if (cbOauthModal) cbOauthModal.addEventListener('click', (event) => {
-      if (event.target === cbOauthModal) closeCodeBuddyLoginModal();
-    });
-    const cbOauthModalCloseBtn = $('cbOauthModalCloseBtn');
-    if (cbOauthModalCloseBtn) cbOauthModalCloseBtn.addEventListener('click', closeCodeBuddyLoginModal);
-    const cbOauthModalOpenBtn = $('cbOauthModalOpenBtn');
-    if (cbOauthModalOpenBtn) cbOauthModalOpenBtn.addEventListener('click', (e) => copyText(getCodeBuddyLoginModalUrl(), 'CodeBuddy 采集脚本', e.currentTarget));
-    const cbOauthModalCopyBtn = $('cbOauthModalCopyBtn');
-    if (cbOauthModalCopyBtn) cbOauthModalCopyBtn.addEventListener('click', (e) => copyText(getCodeBuddyLoginModalUrl(), 'CodeBuddy helper 模板', e.currentTarget));
-    const cbOauthModalCheckBtn = $('cbOauthModalCheckBtn');
-    if (cbOauthModalCheckBtn) cbOauthModalCheckBtn.addEventListener('click', checkCodeBuddyOAuth);
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') closeCodeBuddyLoginModal();
-    });
     const cbProbeBtn = $('cbProbeBtn');
     if (cbProbeBtn) cbProbeBtn.addEventListener('click', runCodeBuddyProbe);
-    const cbOauthLabel = $('cbOauthLabel');
-    if (cbOauthLabel && !cbOauthLabel.value) cbOauthLabel.value = state.codebuddy.oauthLabel || 'CodeBuddy Gateway';
     const cbAccountRows = $('codebuddyAccountRows');
     if (cbAccountRows) {
       cbAccountRows.addEventListener('click', (event) => {

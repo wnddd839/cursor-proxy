@@ -198,13 +198,14 @@ test("direct admin renders an api-key-only CodeBuddy import panel", () => {
   assert.match(html, /id="cbApiKeySite"/);
   assert.match(html, /value="domestic"/);
   assert.match(html, /value="global"/);
+  assert.match(html, /id="cbApiEndpoint"/);
   assert.match(html, /id="cbApiKeyValue"/);
   assert.match(html, /id="cbApiKeyImportBtn"/);
   assert.match(html, /id="cbProbeBtn"/);
   assert.match(html, /id="cbProbeBox"/);
-  assert.doesNotMatch(html, /id="codebuddyOAuthPanel"/);
-  assert.doesNotMatch(html, /id="cbOauthStartBtn"/);
-  assert.doesNotMatch(html, /id="cbOauthCheckBtn"/);
+  assert.match(html, /id="codebuddyOAuthPanel"/);
+  assert.match(html, /id="cbOAuthStartBtn"/);
+  assert.match(html, /id="cbOAuthPollBtn"/);
   assert.doesNotMatch(html, /id="cbOauthModal"/);
   assert.doesNotMatch(html, /Copy as cURL/);
   assert.doesNotMatch(html, /HttpOnly Cookie/);
@@ -231,19 +232,18 @@ test("direct admin wires api-key-only CodeBuddy import logic", () => {
   assert.match(html, /function importCodeBuddyApiKey/);
   assert.match(html, /\/codebuddy\/accounts\/import/);
   assert.match(html, /cbApiKeySite/);
-  assert.match(html, /JSON\.stringify\(\{\s*label,\s*apiKey,\s*site\s*\}\)/);
+  assert.match(html, /JSON\.stringify\(\{\s*label,\s*apiKey,\s*site,\s*apiEndpoint\s*\}\)/);
   assert.match(html, /refreshCodeBuddy\(true\)/);
   assert.match(html, /function runCodeBuddyProbe/);
   assert.match(html, /function loadCodeBuddyModels/);
-  assert.doesNotMatch(html, /function renderCodeBuddyOAuth/);
-  assert.doesNotMatch(html, /function startCodeBuddyOAuth/);
-  assert.doesNotMatch(html, /function checkCodeBuddyOAuth/);
+  assert.match(html, /function renderCodeBuddyOAuth/);
+  assert.match(html, /function startCodeBuddyOAuth/);
+  assert.match(html, /function pollCodeBuddyOAuth/);
+  assert.match(html, /\/codebuddy\/oauth\/start/);
+  assert.match(html, /\/codebuddy\/oauth\/poll/);
   assert.doesNotMatch(html, /function buildCodeBuddyStorageCollectorScript/);
   assert.doesNotMatch(html, /function buildCodeBuddyCookieCollectorScript/);
   assert.doesNotMatch(html, /function buildCodeBuddyHelperTemplate/);
-  assert.doesNotMatch(html, /api\('\/codebuddy\/oauth\/session'/);
-  assert.doesNotMatch(html, /api\('\/codebuddy\/oauth\/start'/);
-  assert.doesNotMatch(html, /api\('\/codebuddy\/oauth\/callback'/);
 });
 
 test("direct admin handles missing CodeBuddy backend routes gracefully", () => {
